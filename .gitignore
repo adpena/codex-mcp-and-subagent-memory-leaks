@@ -1,7 +1,9 @@
-# Local working clones of openai/codex used for investigation.
+# Local working clone of openai/codex used to author and verify the patch.
 # Kept on disk so the patch can be regenerated, but not committed.
+# The canonical state is branch `fix/subagent-retention-after-19753` off
+# upstream `origin/main`, with a single commit producing the patch in
+# `patches/pr1-subagent-retention-after-19753.patch`.
 codex/
-codex-pr2/
 
 # Raw investigation scratch (large build/test logs, fleet helpers, redundant PR drafts).
 # Curated outputs live under artifacts/ and patches/ instead.

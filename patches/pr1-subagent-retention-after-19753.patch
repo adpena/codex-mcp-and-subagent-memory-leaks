@@ -1,8 +1,65 @@
+From 394cdf3bfd1788624ba76dc880b2ab01d2a666fc Mon Sep 17 00:00:00 2001
+From: Alejandro Pena <adpena@gmail.com>
+Date: Tue, 28 Apr 2026 23:13:51 -0500
+Subject: [PATCH] codex-core: retire finalized spawned agents and drain live
+ descendants on root shutdown
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Complements PR #19753 by closing two structural gaps it doesn't address:
+finalized (`Completed` / `Errored`) spawned agents now retire from live slot
+ownership while preserving cached final status, and root-session shutdown
+drains live spawned descendants before tearing down conversation / MCP / etc.
+
+Defect 1 — registry-level retirement:
+- `AgentMetadata` gains `last_status: Option<AgentStatus>` and `slot_active`.
+- `AgentRegistry::retire_spawned_thread(thread_id, status)` caches the final
+  status, flips `slot_active = false`, and decrements `total_count` once.
+- `AgentControl::retire_finalized_agent(thread_id, status)` is invoked by the
+  completion watcher when status transitions to `Completed` / `Errored`.
+  `Shutdown` is intentionally not retired (regressed an existing resume-path
+  test).
+- `get_status` / `wait_agent` / `list_agents` fall back to cached registry
+  status when no live thread exists. `resume_agent` switches to
+  `has_live_thread(thread_id)` instead of treating any non-`NotFound` as
+  proof of non-resumability.
+
+Defect 2 — live-descendant drain on root shutdown:
+- `session::handlers::shutdown` now calls
+  `live_thread_spawn_descendants(root_thread_id)` and submits shutdown to
+  each, before and after `conversation.shutdown()`.
+- The spawned-agent registry is cleared at the end only when no live
+  descendants remain detectable.
+
+Hygiene:
+- `SpawnReservation::Drop` releases the reserved nickname when spawn setup
+  fails before commit.
+
+Verification on this branch:
+- `cargo fmt --all -- --check` ok.
+- `cargo clippy -p codex-core --tests -- -D warnings` clean.
+- `cargo test -p codex-core --lib retire_releases_slot_and_preserves_cached_status` ok.
+- `cargo test -p codex-core --lib spawn_agent_releases_slot_after_completion` ok.
+- `cargo test -p codex-core --lib root_shutdown_shuts_down_live_spawned_descendants` ok.
+- `cargo test -p codex-core --lib failed_spawn_releases_reserved_nickname` ok.
+---
+ codex-rs/core/src/agent/control.rs            |  85 ++++++++--
+ codex-rs/core/src/agent/control_tests.rs      | 153 +++++++++++++++++-
+ codex-rs/core/src/agent/registry.rs           |  59 ++++++-
+ codex-rs/core/src/agent/registry_tests.rs     |  59 ++++++-
+ codex-rs/core/src/session/handlers.rs         |  58 +++++++
+ .../handlers/multi_agents/resume_agent.rs     |   7 +-
+ .../src/tools/handlers/multi_agents/wait.rs   |   3 +-
+ codex-rs/core/tests/common/lib.rs             |   4 +
+ codex-rs/core/tests/suite/mod.rs              |   4 +
+ 9 files changed, 409 insertions(+), 23 deletions(-)
+
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
-index 509a578f5..f70708e98 100644
+index 19ef2a54fe..06369fa0fc 100644
 --- a/codex-rs/core/src/agent/control.rs
 +++ b/codex-rs/core/src/agent/control.rs
-@@ -599,6 +599,13 @@ impl AgentControl {
+@@ -637,6 +637,13 @@ impl AgentControl {
          result
      }
  
@@ -16,7 +73,7 @@ index 509a578f5..f70708e98 100644
      /// Append a prebuilt message to an existing agent thread outside the normal user-input path.
      #[cfg(test)]
      pub(crate) async fn append_message(
-@@ -657,6 +664,22 @@ impl AgentControl {
+@@ -695,6 +702,22 @@ impl AgentControl {
          result
      }
  
@@ -39,7 +96,7 @@ index 509a578f5..f70708e98 100644
      /// Submit a shutdown request for a live agent without marking it explicitly closed in
      /// persisted spawn-edge state.
      pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
-@@ -669,6 +692,8 @@ impl AgentControl {
+@@ -707,6 +730,8 @@ impl AgentControl {
              } else {
                  state.send_op(agent_id, Op::Shutdown {}).await
              }
@@ -48,7 +105,7 @@ index 509a578f5..f70708e98 100644
          } else {
              state.send_op(agent_id, Op::Shutdown {}).await
          };
-@@ -711,10 +736,12 @@ impl AgentControl {
+@@ -749,10 +774,12 @@ impl AgentControl {
              // No agent available if upgrade fails.
              return AgentStatus::NotFound;
          };
@@ -65,7 +122,7 @@ index 509a578f5..f70708e98 100644
      }
  
      pub(crate) fn register_session_root(
-@@ -740,6 +767,30 @@ impl AgentControl {
+@@ -778,6 +805,30 @@ impl AgentControl {
          Ok(thread_ids)
      }
  
@@ -96,7 +153,7 @@ index 509a578f5..f70708e98 100644
      pub(crate) async fn get_agent_config_snapshot(
          &self,
          agent_id: ThreadId,
-@@ -871,19 +922,22 @@ impl AgentControl {
+@@ -899,19 +950,22 @@ impl AgentControl {
              {
                  continue;
              }
@@ -124,7 +181,7 @@ index 509a578f5..f70708e98 100644
                  last_task_message,
              });
          }
-@@ -928,6 +982,14 @@ impl AgentControl {
+@@ -956,6 +1010,14 @@ impl AgentControl {
                  return;
              }
  
@@ -139,7 +196,7 @@ index 509a578f5..f70708e98 100644
              let Ok(state) = control.upgrade() else {
                  return;
              };
-@@ -1006,6 +1068,7 @@ impl AgentControl {
+@@ -1034,6 +1096,7 @@ impl AgentControl {
              agent_nickname,
              agent_role,
              last_task_message: None,
@@ -147,7 +204,7 @@ index 509a578f5..f70708e98 100644
          };
          Ok((session_source, agent_metadata))
      }
-@@ -1133,7 +1196,7 @@ impl AgentControl {
+@@ -1161,7 +1224,7 @@ impl AgentControl {
          }
      }
  
@@ -156,7 +213,7 @@ index 509a578f5..f70708e98 100644
          &self,
          root_thread_id: ThreadId,
      ) -> CodexResult<Vec<ThreadId>> {
-@@ -1160,7 +1223,7 @@ impl AgentControl {
+@@ -1188,7 +1251,7 @@ impl AgentControl {
      }
  }
  
@@ -166,10 +223,10 @@ index 509a578f5..f70708e98 100644
          SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
              parent_thread_id, ..
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index d33285316..f8d484c54 100644
+index 8ce7fa2ea2..d2c5eaab3e 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -993,6 +993,143 @@ async fn spawn_agent_releases_slot_after_shutdown() {
+@@ -1030,6 +1030,142 @@ async fn spawn_agent_releases_slot_after_shutdown() {
          .expect("shutdown agent");
  }
  
@@ -184,10 +241,8 @@ index d33285316..f8d484c54 100644
 +    let manager = ThreadManager::with_models_provider_and_home_for_tests(
 +        CodexAuth::from_api_key("dummy"),
 +        config.model_provider.clone(),
-+        config.codex_home.clone(),
-+        std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
-+            /*exec_server_url*/ None,
-+        )),
++        config.codex_home.to_path_buf(),
++        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
 +    );
 +    let control = manager.agent_control();
 +    let parent = manager
@@ -225,6 +280,7 @@ index d33285316..f8d484c54 100644
 +                last_agent_message: Some("done".to_string()),
 +                completed_at: None,
 +                duration_ms: None,
++                time_to_first_token_ms: None,
 +            }),
 +        )
 +        .await;
@@ -313,8 +369,8 @@ index d33285316..f8d484c54 100644
  #[tokio::test]
  async fn spawn_agent_limit_shared_across_clones() {
      let max_threads = 1usize;
-@@ -1057,12 +1194,23 @@ async fn resume_agent_respects_max_threads_limit() {
-         )),
+@@ -1090,12 +1226,23 @@ async fn resume_agent_respects_max_threads_limit() {
+         std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
      );
      let control = manager.agent_control();
 +    let parent = manager
@@ -338,7 +394,7 @@ index d33285316..f8d484c54 100644
          )
          .await
          .expect("spawn_agent should succeed");
-@@ -1075,13 +1223,13 @@ async fn resume_agent_respects_max_threads_limit() {
+@@ -1108,13 +1255,13 @@ async fn resume_agent_respects_max_threads_limit() {
          .spawn_agent(
              config.clone(),
              text_input("occupy"),
@@ -355,7 +411,7 @@ index d33285316..f8d484c54 100644
          .expect_err("resume should respect max threads");
      let CodexErr::AgentLimitReached {
 diff --git a/codex-rs/core/src/agent/registry.rs b/codex-rs/core/src/agent/registry.rs
-index 1acd73085..2d5682ab0 100644
+index 1acd73085f..2d5682ab09 100644
 --- a/codex-rs/core/src/agent/registry.rs
 +++ b/codex-rs/core/src/agent/registry.rs
 @@ -2,6 +2,7 @@ use codex_protocol::AgentPath;
@@ -473,7 +529,7 @@ index 1acd73085..2d5682ab0 100644
                  self.state.release_reserved_agent_path(&agent_path);
              }
 diff --git a/codex-rs/core/src/agent/registry_tests.rs b/codex-rs/core/src/agent/registry_tests.rs
-index fc172fb33..c343e8740 100644
+index fc172fb336..c343e87407 100644
 --- a/codex-rs/core/src/agent/registry_tests.rs
 +++ b/codex-rs/core/src/agent/registry_tests.rs
 @@ -1,5 +1,6 @@
@@ -559,78 +615,78 @@ index fc172fb33..c343e8740 100644
 +        .expect("slots should be released after root shutdown clear");
 +    drop(reservation);
 +}
-diff --git a/codex-rs/core/src/codex.rs b/codex-rs/core/src/codex.rs
-index f44a79528..31f27ae48 100644
---- a/codex-rs/core/src/codex.rs
-+++ b/codex-rs/core/src/codex.rs
-@@ -5657,7 +5657,65 @@ mod handlers {
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index 4965cdb389..b13a1c5509 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -878,7 +878,65 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
  
-     pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
-         sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
-+        let session_source = {
-+            let state = sess.state.lock().await;
-+            state.session_configuration.session_source.clone()
-+        };
-+        let should_shutdown_descendants =
-+            crate::agent::control::thread_spawn_parent_thread_id(&session_source).is_none();
-+        if should_shutdown_descendants
-+            && let Err(err) = sess
-+                .services
-+                .agent_control
-+                .shutdown_live_descendants(sess.conversation_id)
-+                .await
+ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
+     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
++    let session_source = {
++        let state = sess.state.lock().await;
++        state.session_configuration.session_source.clone()
++    };
++    let should_shutdown_descendants =
++        crate::agent::control::thread_spawn_parent_thread_id(&session_source).is_none();
++    if should_shutdown_descendants
++        && let Err(err) = sess
++            .services
++            .agent_control
++            .shutdown_live_descendants(sess.conversation_id)
++            .await
++    {
++        warn!(
++            "failed pre-shutdown descendant cleanup for {}: {err}",
++            sess.conversation_id
++        );
++    }
+     let _ = sess.conversation.shutdown().await;
++    if should_shutdown_descendants
++        && let Err(err) = sess
++            .services
++            .agent_control
++            .shutdown_live_descendants(sess.conversation_id)
++            .await
++    {
++        warn!(
++            "failed post-shutdown descendant cleanup for {}: {err}",
++            sess.conversation_id
++        );
++    }
++    if should_shutdown_descendants {
++        match sess
++            .services
++            .agent_control
++            .live_thread_spawn_descendants(sess.conversation_id)
++            .await
 +        {
-+            warn!(
-+                "failed pre-shutdown descendant cleanup for {}: {err}",
-+                sess.conversation_id
-+            );
-+        }
-         let _ = sess.conversation.shutdown().await;
-+        if should_shutdown_descendants
-+            && let Err(err) = sess
-+                .services
-+                .agent_control
-+                .shutdown_live_descendants(sess.conversation_id)
-+                .await
-+        {
-+            warn!(
-+                "failed post-shutdown descendant cleanup for {}: {err}",
-+                sess.conversation_id
-+            );
-+        }
-+        if should_shutdown_descendants {
-+            match sess
-+                .services
-+                .agent_control
-+                .live_thread_spawn_descendants(sess.conversation_id)
-+                .await
-+            {
-+                Ok(descendants) => {
-+                    if descendants.is_empty() {
-+                        sess.services
-+                            .agent_control
-+                            .clear_spawned_registry_for_root_shutdown();
-+                    } else {
-+                        warn!(
-+                            "skipping spawned-agent registry clear for {} with {} descendants still live",
-+                            sess.conversation_id,
-+                            descendants.len()
-+                        );
-+                    }
-+                }
-+                Err(err) => {
++            Ok(descendants) => {
++                if descendants.is_empty() {
++                    sess.services
++                        .agent_control
++                        .clear_spawned_registry_for_root_shutdown();
++                } else {
 +                    warn!(
-+                        "skipping spawned-agent registry clear for {} after descendant lookup failure: {err}",
-+                        sess.conversation_id
++                        "skipping spawned-agent registry clear for {} with {} descendants still live",
++                        sess.conversation_id,
++                        descendants.len()
 +                    );
 +                }
 +            }
++            Err(err) => {
++                warn!(
++                    "skipping spawned-agent registry clear for {} after descendant lookup failure: {err}",
++                    sess.conversation_id
++                );
++            }
 +        }
-         sess.services
-             .unified_exec_manager
-             .terminate_all_processes()
++    }
+     sess.services
+         .unified_exec_manager
+         .terminate_all_processes()
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs b/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs
-index 9991a9067..d62faa3b4 100644
+index 2d4f2c3f47..d679c49d23 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs
 @@ -60,7 +60,12 @@ impl ToolHandler for Handler {
@@ -644,11 +700,11 @@ index 9991a9067..d62faa3b4 100644
 +            .has_live_thread(receiver_thread_id)
 +            .await;
 +        let (receiver_agent, error) = if !is_live {
-             match try_resume_closed_agent(&session, &turn, receiver_thread_id, child_depth).await {
-                 Ok(()) => {
-                     status = session
+             match Box::pin(try_resume_closed_agent(
+                 &session,
+                 &turn,
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents/wait.rs b/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
-index 77fa5f83a..45f032f00 100644
+index 77fa5f83a2..45f032f00a 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
 @@ -94,7 +94,8 @@ impl ToolHandler for Handler {
@@ -662,10 +718,10 @@ index 77fa5f83a..45f032f00 100644
                  Err(err) => {
                      let mut statuses = HashMap::with_capacity(1);
 diff --git a/codex-rs/core/tests/common/lib.rs b/codex-rs/core/tests/common/lib.rs
-index a11d5ee6a..f2847017e 100644
+index c89e6a5188..315d5c030b 100644
 --- a/codex-rs/core/tests/common/lib.rs
 +++ b/codex-rs/core/tests/common/lib.rs
-@@ -38,11 +38,15 @@ fn enable_deterministic_unified_exec_process_ids_for_tests() {
+@@ -41,11 +41,15 @@ fn enable_deterministic_unified_exec_process_ids_for_tests() {
  
  #[ctor]
  fn configure_arg0_dispatch_for_test_binaries() {
@@ -682,18 +738,18 @@ index a11d5ee6a..f2847017e 100644
          return;
      }
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index a553cbced..2188693f7 100644
+index bcf4e3d558..805caf0e8c 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -21,6 +21,7 @@ const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
+@@ -10,6 +10,7 @@ use ctor::ctor;
  // It allows the test binary to behave like codex and dispatch to apply_patch and codex-linux-sandbox
  // based on the arg0.
  // NOTE: this doesn't work on ARM
 +#[cfg(not(miri))]
  #[ctor]
- pub static CODEX_ALIASES_TEMP_DIR: Option<TestCodexAliasesGuard> = {
-     let mut args = std::env::args_os();
-@@ -70,6 +71,9 @@ pub static CODEX_ALIASES_TEMP_DIR: Option<TestCodexAliasesGuard> = {
+ pub static CODEX_ALIASES_TEMP_DIR: Option<TestBinaryDispatchGuard> = {
+     configure_test_binary_dispatch("codex-core-tests", |exe_name, argv1| {
+@@ -23,6 +24,9 @@ pub static CODEX_ALIASES_TEMP_DIR: Option<TestBinaryDispatchGuard> = {
      })
  };
  
@@ -703,3 +759,6 @@ index a553cbced..2188693f7 100644
  #[cfg(not(target_os = "windows"))]
  mod abort_tasks;
  mod agent_jobs;
+-- 
+2.50.1 (Apple Git-155)
+

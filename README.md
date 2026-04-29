@@ -263,13 +263,39 @@ descendants that only become observable mid-shutdown.
 The combination, not any one of these alone, makes the busiest root session the
 first to destabilize.
 
-## Patch (`patches/pr1-subagent-retention-root-teardown.patch`)
+## Patch
 
-9 files, 410 insertions, 23 deletions, against `3895ddd6b`.
+Two patch files are provided:
+
+- [`patches/pr1-subagent-retention-after-19753.patch`](patches/pr1-subagent-retention-after-19753.patch)
+  — **canonical**, applies on top of [`openai/codex@80fb0704ee`](https://github.com/openai/codex/commit/80fb0704ee8b23ab7cbc3f2c4dcdbf3c1a5fbd4b)
+  (current `main` after [#19753](https://github.com/openai/codex/pull/19753)).
+  Generated via `git format-patch` from a single commit on a clean topic
+  branch off `origin/main`. 9 files, 409 insertions, 23 deletions.
+- [`patches/pr1-subagent-retention-root-teardown.patch`](patches/pr1-subagent-retention-root-teardown.patch)
+  — original PR1 patch against `3895ddd6b` (the investigation commit), kept
+  for historical reference and provenance.
+
+Verification on the canonical patch (against `openai/codex@80fb0704ee` on
+branch `fix/subagent-retention-after-19753`):
+
+- `git apply --check patches/pr1-subagent-retention-after-19753.patch` — clean.
+- `cargo fmt --all -- --check` — clean.
+- `cargo clippy -p codex-core --tests -- -D warnings` — clean (no warnings).
+- `cargo test -p codex-core --lib retire_releases_slot_and_preserves_cached_status` — passes.
+- `cargo test -p codex-core --lib spawn_agent_releases_slot_after_completion` — passes.
+- `cargo test -p codex-core --lib root_shutdown_shuts_down_live_spawned_descendants` — passes.
+- `cargo test -p codex-core --lib failed_spawn_releases_reserved_nickname` — passes.
+
+The patch composes cleanly with #19753 (no overlapping hunks), modifying 9
+files:
 
 - `codex-rs/core/src/agent/registry.rs`
 - `codex-rs/core/src/agent/control.rs`
-- `codex-rs/core/src/codex.rs`
+- `codex-rs/core/src/codex.rs` (in original) → `codex-rs/core/src/session/handlers.rs`
+  (in re-targeted, after the `codex.rs` → `session/{handlers.rs, …}` split in
+  PRs [#18244](https://github.com/openai/codex/pull/18244) and
+  [#18249](https://github.com/openai/codex/pull/18249))
 - `codex-rs/core/src/tools/handlers/multi_agents/wait.rs`
 - `codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs`
 - `codex-rs/core/src/agent/registry_tests.rs` (new tests)
@@ -352,16 +378,27 @@ clean upstream.
 
 ## Apply
 
+Canonical patch (against current `main` after #19753):
+
 ```bash
 git clone https://github.com/openai/codex.git
 cd codex
-git checkout 3895ddd6b1caf80cd77d6fd44e3ce55bd290ef18
-git apply /path/to/patches/pr1-subagent-retention-root-teardown.patch
+git checkout 80fb0704ee8b23ab7cbc3f2c4dcdbf3c1a5fbd4b
+git apply /path/to/patches/pr1-subagent-retention-after-19753.patch
 cd codex-rs
-cargo fmt --all
+cargo fmt --all -- --check
 cargo clippy -p codex-core --tests -- -D warnings
-cargo test -p codex-core spawn_agent_releases_slot_after_completion -- --nocapture
-cargo test -p codex-core root_shutdown_shuts_down_live_spawned_descendants -- --nocapture
+cargo test -p codex-core --lib retire_releases_slot_and_preserves_cached_status -- --nocapture
+cargo test -p codex-core --lib spawn_agent_releases_slot_after_completion -- --nocapture
+cargo test -p codex-core --lib root_shutdown_shuts_down_live_spawned_descendants -- --nocapture
+cargo test -p codex-core --lib failed_spawn_releases_reserved_nickname -- --nocapture
+```
+
+Or, equivalently, fetch the topic branch directly via `git format-patch` /
+`git am`:
+
+```bash
+git am /path/to/patches/pr1-subagent-retention-after-19753.patch
 ```
 
 ## Reproduce
