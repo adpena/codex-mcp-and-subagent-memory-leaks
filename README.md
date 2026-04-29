@@ -163,28 +163,34 @@ config with `[agents] max_threads = 4`):
 | Process-sample mean (steady state)                      | 25.0                            | 24.1                                           | ≈ same   |
 | Surviving codex / MCP processes after teardown          | 0                               | 0                                              | ≈ same   |
 
-Reading: under the same `spawn_recursive` SSE fixture and the same
-`max_threads = 4` cap, the patched binary admits about **3 × more
-successful `spawn_agent` invocations per worker per minute** before the
-slot accounting blocks new spawns. That's the slot-retention defect (and
-its fix) showing up empirically: when finalized subagents retire and
-release their slot, new spawns succeed instead of erroring with
-`agent thread limit reached`. The total per-worker rate of model-emitted
-spawn attempts is the same in both runs (the SSE fixture replays the
-same events at roughly the same speed) — only the *acceptance* rate
-changes.
+Reading (with caveats below): under the same `spawn_recursive` SSE
+fixture and the same `max_threads = 4` cap, the patched binary's
+rejection rate drops from ~46k/worker/min to ~16k/worker/min — a 64 %
+reduction. The patched binary is rejecting fewer `spawn_agent` calls
+per unit time, which is consistent with the patch-driven retirement
+releasing slot capacity that finalized subagents previously held.
 
-What the soak still doesn't prove on its own:
+What the soak does **not** prove, and shouldn't be cited as proving:
 
-- That the MCP child for a *retired* subagent is gone afterwards. Per-worker
-  steady-state process counts are dominated by the root session's
-  `McpConnectionManager` startup, which both runs share. An integration
-  test using `MCP_TEST_PID_FILE` against `test_stdio_server` (along the
-  lines of [#19753](https://github.com/openai/codex/pull/19753)'s
-  `process_group_cleanup.rs`) is the cleaner verification here. Listed as
-  pending follow-up below.
-- That race conditions between explicit shutdown / retirement / descendant
-  drain compose correctly. Listed as pending follow-up.
+- **Apples-to-apples isn't perfectly clean.** Unpatched is `codex-cli
+  0.125.0` (release profile, predates #19753); patched is the fix
+  branch built with `--profile dev` (debug profile, runs slower).
+  Replay rates may differ for reasons unrelated to retirement.
+- **Soak measures rejected spawns, not accepted ones.** A drop in
+  rejection rate is consistent with retirement freeing slots, but it
+  could in principle also reflect a slower replay rate or different
+  SSE-channel buffering on debug vs release. A clean A/B would build
+  both binaries with the same profile and add an explicit
+  accepted-spawn counter to the harness.
+- **Per-MCP-child termination on retirement is not asserted here.**
+  Per-worker steady-state process counts are dominated by the root
+  session's `McpConnectionManager` startup, which both runs share. The
+  cleaner verification is an integration test mirroring
+  [#19753](https://github.com/openai/codex/pull/19753)'s
+  `process_group_cleanup.rs` using `MCP_TEST_PID_FILE`. See pending
+  follow-up below.
+- **Concurrent shutdown / retirement races aren't covered by the
+  soak.** Pending follow-up.
 
 Raw summaries:
 [`artifacts/soak-summaries/`](artifacts/soak-summaries/).
@@ -306,15 +312,18 @@ Two patch files are provided:
   (current `main` after [#19753](https://github.com/openai/codex/pull/19753)).
   Generated via `git format-patch` from three squashed commits on
   branch `fix/subagent-retention-after-19753` off `origin/main`. The
-  earlier 9-file / 409+ / 23- shape grew to address adversarial-review
-  findings: explicit `SlotState` lifecycle enum (replacing
+  earlier 9-file / 409+ / 23- shape grew through two adversarial-review
+  passes: explicit `SlotState` lifecycle enum (replacing
   `slot_active: bool` + `last_status: Option<AgentStatus>`), V2
-  retirement wired into `Session::maybe_notify_parent_of_terminal_turn`,
-  explicit `Op::Shutdown` send from `retire_finalized_agent` (so #19753's
-  MCP teardown fires deterministically rather than via implicit channel
-  close), deadline-bounded descendant sweep (30 s wall + 64-sweep cap),
-  and a new V2 retirement test
-  (`v2_spawn_agent_releases_slot_after_completion`).
+  retirement wired into `Session::maybe_notify_parent_of_terminal_turn`
+  via `tokio::spawn` (the synchronous version self-deadlocked on the
+  bounded submission channel), explicit `Op::Shutdown` enqueue from
+  `retire_finalized_agent` (so #19753's MCP teardown picks up retired
+  sessions instead of relying on `Arc<CodexThread>` drop timing), hard
+  deadline-bounded descendant sweep (30 s wall + 64-sweep cap, with
+  `tokio::time::timeout_at` wrapping each `shutdown_live_agent` so a
+  stuck descendant cannot block the deadline), and new V2 retirement
+  + race tests.
 - [`patches/pr1-subagent-retention-root-teardown.patch`](patches/pr1-subagent-retention-root-teardown.patch)
   — original PR1 patch against `3895ddd6b` (the investigation commit), kept
   for historical reference and provenance.
@@ -348,22 +357,44 @@ files:
 
 Changes:
 
-- `AgentMetadata` gains `last_status: Option<AgentStatus>` and `slot_active: bool`.
-- `AgentRegistry::retire_spawned_thread(thread_id, status)` caches the final
-  status, flips `slot_active = false`, and decrements the live spawned count once.
-- `AgentControl::retire_finalized_agent` removes the live thread, retires the
-  slot, and tolerates rollout flush failure. The completion watcher retires only
-  `Completed` / `Errored`. Broad retirement of `Shutdown` regressed an existing
-  resume-path test, so it's left alone — flagged as an open question below.
-- `get_status`, `wait_agent`, and `list_agents` fall back to cached registry
-  status when the live thread is gone. `resume_agent` switches to
-  `has_live_thread(thread_id)` instead of treating any non-`NotFound` status as
-  proof of non-resumability.
-- `handlers::shutdown` does two descendant shutdown passes (before and after
-  `conversation.shutdown()`) and clears the spawned-agent registry only when
-  `live_thread_spawn_descendants` returns empty.
-- `SpawnReservation::Drop` releases the reserved nickname if spawn setup fails
-  before commit.
+- `AgentMetadata.slot_state: SlotState` (explicit
+  `NotTracked` / `Active` / `Retired { last_status }`), replacing the prior
+  `slot_active: bool` + `last_status: Option<AgentStatus>` pair so the
+  three lifecycle states are distinguishable in the type system.
+- `AgentRegistry::retire_spawned_thread(thread_id, status)` transitions
+  `Active → Retired { last_status }` and decrements the live spawned count
+  exactly once. Idempotent under repeated retire / interleaved release
+  (covered by the registry-level race tests below).
+- `AgentControl::retire_finalized_agent` flushes rollout, enqueues
+  `Op::Shutdown` on the session's submission channel (so
+  `session::handlers::shutdown` runs once the session loop drains it,
+  picking up #19753's `mcp_connection_manager.begin_shutdown()`),
+  removes the live thread, and retires the registry slot. Tolerates
+  rollout flush failure and channel-closed errors. Invoked from V1's
+  `maybe_start_completion_watcher` (existing) and from V2's
+  `Session::maybe_notify_parent_of_terminal_turn` via `tokio::spawn` so
+  the call cannot self-deadlock on the same session's bounded submission
+  channel. The completion watcher and V2 path retire only `Completed` /
+  `Errored`. Broad retirement of `Shutdown` regressed an existing
+  resume-path test, so it's left alone — flagged as an open question.
+  Whether `handlers::shutdown` actually runs and whether
+  `begin_shutdown()` actually fires for the retired session is not
+  asserted at the unit level; that needs the integration test in the
+  pending follow-up list.
+- `get_status`, `wait_agent`, and `list_agents` fall back to cached
+  registry status when the live thread is gone. `resume_agent` switches
+  to `has_live_thread(thread_id)` instead of treating any non-`NotFound`
+  status as proof of non-resumability.
+- `handlers::shutdown` does two descendant shutdown passes (before and
+  after `conversation.shutdown()`) and clears the spawned-agent registry
+  only when `live_thread_spawn_descendants` returns empty. The drain is
+  bounded by a hard 30 s wall-clock deadline (each
+  `shutdown_live_agent` is wrapped in `tokio::time::timeout_at`, not just
+  the outer loop), a 64-sweep cap, and a 50 ms backoff between sweeps
+  whose live-set didn't shrink, so root teardown cannot hot-loop or
+  block indefinitely on a stuck descendant.
+- `SpawnReservation::Drop` releases the reserved nickname if spawn setup
+  fails before commit.
 
 Per-file behavioral diff and residual risk:
 [`artifacts/pr1-change-dossier.md`](artifacts/pr1-change-dossier.md).

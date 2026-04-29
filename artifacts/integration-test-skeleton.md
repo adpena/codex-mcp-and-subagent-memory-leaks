@@ -37,27 +37,36 @@ It is documented here rather than implemented inline because:
 ## Skeleton (Rust)
 
 Belongs in `codex-rs/core/tests/suite/spawn_agent_retirement.rs`,
-modeled on `process_group_cleanup.rs` (which lives in
-`codex-rs/rmcp-client/tests/`).
+modeled on `process_group_cleanup.rs` (`codex-rs/rmcp-client/tests/`).
+
+The pseudocode below uses real APIs from this repo:
+[`TestCodexBuilder`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/tests/common/test_codex.rs)
+(`test_codex()` returns a builder, `build()` is async),
+[`McpServerConfig`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/config/src/mcp_types.rs)
+(`McpServerTransportConfig::Stdio` takes `String`, not `OsString`;
+`env: Option<HashMap<String, String>>`), `Constrained::set` for
+`config.mcp_servers`, and the four-argument
+`ev_function_call_with_namespace(call_id, namespace, name, arguments)`.
 
 ```rust
 #![cfg(unix)]
 
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::time::Duration;
 
 use anyhow::Result;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
-use codex_features::Feature;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
+use core_test_support::responses::start_mock_server;
 use core_test_support::stdio_server_bin;
 use core_test_support::test_codex::test_codex;
+use serde_json::json;
+use tokio::time::sleep;
 
 fn process_exists(pid: u32) -> bool {
     std::process::Command::new("kill")
@@ -69,73 +78,124 @@ fn process_exists(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+async fn wait_for_pid_file(path: &std::path::Path) -> Result<u32> {
+    for _ in 0..50 {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.parse::<u32>()?);
+            }
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::bail!("timed out waiting for pid file at {}", path.display())
+}
+
+async fn wait_for_process_exit(pid: u32) -> Result<()> {
+    for _ in 0..100 {
+        if !process_exists(pid) {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::bail!("process {pid} still alive after timeout")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalized_subagent_terminates_its_stdio_mcp_child() -> Result<()> {
-    // 1. Build a temp pid-file path.
+    // 1. Bring up the mock model server.
+    let server = start_mock_server().await;
+
+    // 2. Temp dir for the child MCP server's pid file.
     let temp = tempfile::tempdir()?;
     let pid_file = temp.path().join("server.pid");
+    let pid_file_str = pid_file.to_string_lossy().into_owned();
+    let stdio_bin = stdio_server_bin()?;
+    let stdio_bin_str = stdio_bin.to_string_lossy().into_owned();
 
-    // 2. Build a Config with `[agents] max_threads = 2` AND an stdio
-    //    MCP server pointing at `test_stdio_server` with
-    //    `MCP_TEST_PID_FILE` env so the server records its PID.
-    let mut codex = test_codex().await?;
-    codex.config.agent_max_threads = Some(2);
-    codex.config.mcp_servers.insert(
-        "pid_writer".to_string(),
-        McpServerConfig {
-            transport: McpServerTransportConfig::Stdio {
-                command: stdio_server_bin()?.into_os_string(),
-                args: Vec::new(),
-                env: HashMap::from([(
-                    OsString::from("MCP_TEST_PID_FILE"),
-                    OsString::from(pid_file.to_string_lossy().into_owned()),
-                )]),
-            },
-            tool_timeout_sec: None,
-            startup_timeout_sec: None,
-        },
-    );
+    // 3. Build the test session via the real builder. Use `with_config`
+    //    (or the equivalent mutator on TestCodexBuilder) to attach an
+    //    stdio MCP server pointing at test_stdio_server with
+    //    MCP_TEST_PID_FILE so the server records its PID.
+    let codex = test_codex()
+        // Hook: install MCP servers BEFORE build() runs the config-load
+        // sequence. `mcp_servers` is `Constrained<HashMap<...>>`; use
+        // `set()`, not `insert`/`DerefMut`.
+        .with_config_mutator(move |cfg| {
+            let mut servers = cfg.mcp_servers.get().clone();
+            servers.insert(
+                "pid_writer".to_string(),
+                McpServerConfig {
+                    transport: McpServerTransportConfig::Stdio {
+                        command: stdio_bin_str.clone(),
+                        args: Vec::new(),
+                        env: Some(HashMap::from([(
+                            "MCP_TEST_PID_FILE".to_string(),
+                            pid_file_str.clone(),
+                        )])),
+                    },
+                    tool_timeout_sec: None,
+                    startup_timeout_sec: None,
+                },
+            );
+            cfg.mcp_servers.set(servers);
+            // Enable V1 multi-agents with max_threads=1 so spawn_agent
+            // is registered and the slot-retention path is exercised.
+            cfg.agent_max_threads = Some(1);
+        })
+        .with_mock_server(&server)
+        .build()
+        .await?;
 
-    // 3. Mount a model response that emits a single `spawn_agent` call.
+    // 4. Mount the parent SSE response: emit one spawn_agent call,
+    //    then complete the parent's turn. Mount a separate SSE for
+    //    the child thread that emits a TurnComplete immediately.
+    //    (core_test_support routes by request matcher; see
+    //    spawn_agent_description.rs for an equivalent two-thread
+    //    pattern.)
     mount_sse_sequence(
-        &codex.mock_server,
+        &server,
+        /*req_matcher*/ /* parent thread */ /* ... */,
         vec![sse(vec![
-            ev_response_created("resp-spawn"),
+            ev_response_created("resp-parent"),
             ev_function_call_with_namespace(
                 "spawn-call-1",
-                "spawn_agent",
-                json!({"message": "child task"}).to_string(),
+                /*namespace*/ "",
+                /*name*/ "spawn_agent",
+                /*arguments*/ &json!({"message": "child task"}).to_string(),
             ),
-            ev_completed("resp-spawn"),
+            ev_completed("resp-parent"),
+        ])],
+    )
+    .await;
+    mount_sse_sequence(
+        &server,
+        /*req_matcher*/ /* child thread */ /* ... */,
+        vec![sse(vec![
+            ev_response_created("resp-child"),
+            ev_completed("resp-child"),
         ])],
     )
     .await;
 
-    // 4. Drive the parent thread. Parent issues spawn_agent → child
-    //    thread starts → child's session creates its own
-    //    McpConnectionManager, which spawns test_stdio_server with
+    // 5. Drive the parent. Parent issues spawn_agent -> child thread
+    //    starts -> child's SessionServices builds its own
+    //    McpConnectionManager which spawns test_stdio_server with
     //    MCP_TEST_PID_FILE.
     codex.send_user_input("spawn one").await?;
 
-    // 5. Read the PID file. Wait up to 5 s for it to appear.
-    //    Verify the process exists.
+    // 6. Read child's MCP PID. Verify it's live.
     let pid = wait_for_pid_file(&pid_file).await?;
     assert!(process_exists(pid), "MCP child {pid} should be live");
 
-    // 6. Drive the child thread to TurnComplete. The completion watcher
-    //    (V1 path) calls retire_finalized_agent on the child →
-    //    Op::Shutdown is sent → child's handlers::shutdown runs →
-    //    mcp_connection_manager.begin_shutdown() fires → child's
-    //    test_stdio_server PID is killed.
-    //
-    //    Easiest way to drive: push another SSE response sequence for
-    //    the child that emits ev_completed.
-    //
-    //    [Concrete plumbing here depends on how core_test_support
-    //    routes responses to specific child threads — likely needs a
-    //    second mock_server or a routing matcher.]
+    // 7. The child completes (its mounted SSE returns Completed).
+    //    The V1 completion watcher calls retire_finalized_agent ->
+    //    Op::Shutdown is enqueued on the child's submission channel ->
+    //    child's handlers::shutdown runs -> #19753's
+    //    mcp_connection_manager.begin_shutdown() terminates the
+    //    process group.
 
-    // 7. Wait up to 5 s for the PID to disappear. Assert.
+    // 8. Wait for PID to disappear.
     wait_for_process_exit(pid).await?;
 
     Ok(())
@@ -144,21 +204,22 @@ async fn finalized_subagent_terminates_its_stdio_mcp_child() -> Result<()> {
 
 ## Open implementation questions
 
-- `core_test_support::test_codex` doesn't currently expose a way to
-  set per-thread SSE responses — needs verification or extension.
-- Driving subagent completion through `TurnComplete` from a test
-  requires either a mocked model that returns `TurnComplete` after the
-  child's first user input, or direct injection through
-  `Session::send_event` (as the existing
-  `spawn_agent_releases_slot_after_completion` test does).
-- The race timing between `retire_finalized_agent` sending
-  `Op::Shutdown`, the submission_loop processing it, and the
-  `mcp_connection_manager.begin_shutdown()` actually killing the child
-  process group can take up to ~1–2 s. The 5 s `wait_for_process_exit`
-  budget should be enough; if flakiness arises, raise to 10 s.
-- The V2 variant should test the same flow with
-  `Feature::MultiAgentV2` enabled, exercising
-  `Session::maybe_notify_parent_of_terminal_turn`'s retirement call.
+- `TestCodexBuilder` does not expose a documented "per-thread SSE
+  matcher" API; the right routing primitive may need a small extension
+  (or use `wiremock::matchers::body_partial_json` to match on the child
+  vs. parent thread id in the request body). See
+  [`agent_jobs.rs`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/tests/suite/agent_jobs.rs)
+  for a working two-stage `Mock` + custom `Respond` pattern that could
+  be adapted.
+- The V1 watcher runs `retire_finalized_agent` from a `tokio::spawn`,
+  so step 8's timeout has to cover one round-trip through the child's
+  submission queue; 5–10 s should be sufficient.
+- The V2 variant: enable `Feature::MultiAgentV2` instead of setting
+  `agent_max_threads`. V2 retirement runs from
+  `Session::maybe_notify_parent_of_terminal_turn`, also via
+  `tokio::spawn` (after the deadlock fix on 2026-04-29).
+- For determinism, prefer `tokio::time::pause()` if introducing
+  `wait_for_*` polling becomes flaky.
 
 ## Manual verification approximation
 

@@ -1,7 +1,7 @@
 From 394cdf3bfd1788624ba76dc880b2ab01d2a666fc Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Tue, 28 Apr 2026 23:13:51 -0500
-Subject: [PATCH 1/4] codex-core: retire finalized spawned agents and drain
+Subject: [PATCH 1/5] codex-core: retire finalized spawned agents and drain
  live descendants on root shutdown
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -766,7 +766,7 @@ index bcf4e3d558..805caf0e8c 100644
 From c65d747b095e64609790afb6d09af0418495fd78 Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Wed, 29 Apr 2026 11:17:06 -0500
-Subject: [PATCH 2/4] Harden fix per adversarial review: V2 retirement,
+Subject: [PATCH 2/5] Harden fix per adversarial review: V2 retirement,
  deadline sweep, lifecycle enum
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1079,7 +1079,7 @@ index 415b89c0de..67c23cea55 100644
 From 37c05f8c75b348e030a5b66ee9e7ac4a74c4e107 Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Wed, 29 Apr 2026 11:20:21 -0500
-Subject: [PATCH 3/4] Add V2 retirement test (validates Finding 1 fix)
+Subject: [PATCH 3/5] Add V2 retirement test (validates Finding 1 fix)
 
 ---
  codex-rs/core/src/agent/control_tests.rs | 106 +++++++++++++++++++++++
@@ -1209,7 +1209,7 @@ index d2c5eaab3e..de4d72fb77 100644
 From 6153e31dfb6a4216499db0cfb742c04c0a2697ad Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Wed, 29 Apr 2026 12:14:43 -0500
-Subject: [PATCH 4/4] Add registry-level race tests (Finding 5)
+Subject: [PATCH 4/5] Add registry-level race tests (Finding 5)
 
 ---
  codex-rs/core/src/agent/registry_tests.rs | 74 +++++++++++++++++++++++
@@ -1300,6 +1300,203 @@ index c343e87407..80b251703c 100644
  #[test]
  fn clear_for_root_shutdown_releases_all_spawned_slots() {
      let registry = Arc::new(AgentRegistry::default());
+-- 
+2.50.1 (Apple Git-155)
+
+
+From 31754f32167453d1d6124fd155f44c0f5664dc88 Mon Sep 17 00:00:00 2001
+From: Alejandro Pena <adpena@gmail.com>
+Date: Wed, 29 Apr 2026 13:32:35 -0500
+Subject: [PATCH 5/5] Address pass-2 adversarial review (high-severity)
+
+- V2 retirement detached via tokio::spawn (Pass-2 Finding 1).
+  retire_finalized_agent's state.send_op(Op::Shutdown).await ran
+  synchronously from Session::send_event -> maybe_notify_parent_of_terminal_turn,
+  which can deadlock on the bounded (512-cap) submission channel because
+  the receiver IS the same session loop. Mirror the V1 watcher pattern:
+  spawn a task that holds an Arc<AgentControl> clone and runs the
+  retirement asynchronously.
+
+- Hard deadline for descendant sweep (Pass-2 Finding 2). Previously the
+  30s deadline was only checked between sweeps; each
+  shutdown_live_agent.await could block indefinitely on its own
+  send_op. Now each call is wrapped in tokio::time::timeout_at, both
+  the descendant lookup and each shutdown attempt enforce the deadline,
+  and a 50ms sleep_until between residual sweeps prevents hot-looping
+  CPU.
+---
+ codex-rs/core/src/agent/control.rs | 80 ++++++++++++++++++++----------
+ codex-rs/core/src/session/mod.rs   | 36 ++++++++++----
+ 2 files changed, 80 insertions(+), 36 deletions(-)
+
+diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
+index 85b2488f3b..09af76e8eb 100644
+--- a/codex-rs/core/src/agent/control.rs
++++ b/codex-rs/core/src/agent/control.rs
+@@ -833,36 +833,50 @@ impl AgentControl {
+ 
+     /// Maximum total wall-clock time to spend draining live spawned
+     /// descendants during root-session shutdown. Bounded so root teardown
+-    /// cannot hang indefinitely on a misbehaving descendant.
++    /// cannot hang indefinitely on a misbehaving descendant. The deadline
++    /// is *hard*: each individual `shutdown_live_agent` call is wrapped in
++    /// `tokio::time::timeout_at(deadline, ...)`, so a descendant whose
++    /// submission channel is full or whose loop is stuck cannot block the
++    /// sweep beyond `deadline` even on a single iteration.
+     const SHUTDOWN_DESCENDANT_DRAIN_DEADLINE_MS: u64 = 30_000;
+ 
+     /// Soft cap on consecutive sweeps. Acts as a bounded retry budget when
+     /// `live_thread_spawn_descendants` keeps returning the same set after a
+     /// shutdown attempt — for example, because a descendant is itself
+-    /// blocked. Combined with the wall-clock deadline above, the sweep
+-    /// always converges.
++    /// blocked. Combined with the hard deadline above, the sweep always
++    /// converges.
+     const SHUTDOWN_DESCENDANT_DRAIN_MAX_SWEEPS: u32 = 64;
+ 
++    /// Per-iteration backoff before re-listing descendants when a previous
++    /// sweep didn't reduce the live set. Yields to the scheduler so the
++    /// loop doesn't hot-spin on a stuck descendant.
++    const SHUTDOWN_DESCENDANT_DRAIN_RESIDUAL_BACKOFF_MS: u64 = 50;
++
+     pub(crate) async fn shutdown_live_descendants(
+         &self,
+         root_thread_id: ThreadId,
+     ) -> CodexResult<()> {
+-        let deadline = std::time::Instant::now()
+-            + std::time::Duration::from_millis(Self::SHUTDOWN_DESCENDANT_DRAIN_DEADLINE_MS);
++        let deadline = tokio::time::Instant::now()
++            + tokio::time::Duration::from_millis(Self::SHUTDOWN_DESCENDANT_DRAIN_DEADLINE_MS);
+         let mut sweep = 0u32;
+         let mut residual_observed: Option<usize> = None;
+         loop {
+-            let descendants = self.live_thread_spawn_descendants(root_thread_id).await?;
++            let descendants =
++                match tokio::time::timeout_at(deadline, self.live_thread_spawn_descendants(root_thread_id))
++                    .await
++                {
++                    Ok(result) => result?,
++                    Err(_) => {
++                        warn!(
++                            "shutdown_live_descendants for {root_thread_id}: deadline reached during descendant lookup; returning so root shutdown can proceed",
++                        );
++                        return Ok(());
++                    }
++                };
+             let descendant_count = descendants.len();
+             if descendants.is_empty() {
+                 return Ok(());
+             }
+-            if std::time::Instant::now() >= deadline {
+-                warn!(
+-                    "shutdown_live_descendants for {root_thread_id}: deadline reached with {descendant_count} live descendant(s) still observable; returning so root shutdown can proceed",
+-                );
+-                return Ok(());
+-            }
+             if sweep >= Self::SHUTDOWN_DESCENDANT_DRAIN_MAX_SWEEPS {
+                 warn!(
+                     "shutdown_live_descendants for {root_thread_id}: hit sweep cap with {descendant_count} live descendant(s) still observable; returning so root shutdown can proceed",
+@@ -870,24 +884,40 @@ impl AgentControl {
+                 return Ok(());
+             }
+             for descendant_id in descendants {
+-                match self.shutdown_live_agent(descendant_id).await {
+-                    Ok(_) | Err(CodexErr::ThreadNotFound(_)) | Err(CodexErr::InternalAgentDied) => {
++                let shutdown =
++                    tokio::time::timeout_at(deadline, self.shutdown_live_agent(descendant_id))
++                        .await;
++                match shutdown {
++                    Ok(Ok(_))
++                    | Ok(Err(CodexErr::ThreadNotFound(_)))
++                    | Ok(Err(CodexErr::InternalAgentDied)) => {}
++                    Ok(Err(err)) => return Err(err),
++                    Err(_) => {
++                        warn!(
++                            "shutdown_live_descendants for {root_thread_id}: deadline reached while shutting down descendant {descendant_id}; returning so root shutdown can proceed",
++                        );
++                        return Ok(());
+                     }
+-                    Err(err) => return Err(err),
+                 }
+             }
+             sweep += 1;
+-            // Telemetry hook: if we keep seeing the same residual count
+-            // sweep-over-sweep, surface it once so callers can correlate
+-            // with their own monitoring rather than silently spinning.
+-            match residual_observed {
+-                Some(prev) if prev == descendant_count => {
+-                    // Same residual set; let the deadline / sweep cap
+-                    // eventually break us out.
+-                }
+-                _ => {
+-                    residual_observed = Some(descendant_count);
++            // If the live set stayed the same size across this sweep, yield
++            // briefly before re-listing so we don't hot-loop CPU waiting for
++            // a descendant that isn't going to drop on its own.
++            let same_as_last = matches!(residual_observed, Some(prev) if prev == descendant_count);
++            residual_observed = Some(descendant_count);
++            if same_as_last {
++                let backoff = tokio::time::Duration::from_millis(
++                    Self::SHUTDOWN_DESCENDANT_DRAIN_RESIDUAL_BACKOFF_MS,
++                );
++                let next_attempt = tokio::time::Instant::now() + backoff;
++                if next_attempt >= deadline {
++                    warn!(
++                        "shutdown_live_descendants for {root_thread_id}: deadline reached after stuck residual sweep; returning so root shutdown can proceed",
++                    );
++                    return Ok(());
+                 }
++                tokio::time::sleep_until(next_attempt).await;
+             }
+         }
+     }
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 67c23cea55..b29db6589e 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -1516,17 +1516,31 @@ impl Session {
+         // behavior: retire only on `Completed` / `Errored`. `Shutdown` is
+         // intentionally left to `shutdown_live_agent`, which has its own
+         // explicit cleanup path.
+-        if matches!(status, AgentStatus::Completed(_) | AgentStatus::Errored(_))
+-            && let Err(err) = self
+-                .services
+-                .agent_control
+-                .retire_finalized_agent(self.conversation_id, status)
+-                .await
+-        {
+-            warn!(
+-                "V2 retire_finalized_agent for {} returned: {err}",
+-                self.conversation_id
+-            );
++        //
++        // The V1 watcher runs `retire_finalized_agent` from a `tokio::spawn`
++        // started during `spawn_agent_internal`. Mirror that here. Calling
++        // `retire_finalized_agent` synchronously from this method would
++        // self-deadlock under load: this method is called from
++        // `Session::send_event`, which runs on the same submission loop that
++        // `retire_finalized_agent` then awaits via `state.send_op(Op::Shutdown)`.
++        // The submission channel is bounded (`SUBMISSION_CHANNEL_CAPACITY`,
++        // 512), so a backed-up channel would block the send waiting for a
++        // receiver that is itself blocked in this very call. Detaching the
++        // retirement onto a separate task breaks that cycle: the current
++        // session loop returns from `send_event` and resumes draining its
++        // channel, at which point the spawned task's `Op::Shutdown` is
++        // accepted and processed.
++        if matches!(status, AgentStatus::Completed(_) | AgentStatus::Errored(_)) {
++            let agent_control = self.services.agent_control.clone();
++            let agent_id = self.conversation_id;
++            tokio::spawn(async move {
++                if let Err(err) = agent_control
++                    .retire_finalized_agent(agent_id, status)
++                    .await
++                {
++                    warn!("V2 retire_finalized_agent for {agent_id} returned: {err}");
++                }
++            });
+         }
+     }
+ 
 -- 
 2.50.1 (Apple Git-155)
 
