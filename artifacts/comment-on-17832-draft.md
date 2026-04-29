@@ -16,20 +16,32 @@ symptom report.
 
 ## Comment body
 
-Thank you for the detailed forensic data on this — the 213-pair Playwright leak
+Thank you for the detailed forensic data here — the 213-pair Playwright leak
 breakdown and the `vmmap` analysis make the failure mode much easier to reason
-about.
+about. I noticed [#19753](https://github.com/openai/codex/pull/19753) was
+merged earlier today; this comment is intended to complement it, not to
+re-open ground it already covers.
 
-I've spent some time on a root-cause analysis from the
-`codex-rs/core/` side. The full writeup, repro harness, and a candidate patch
-are at https://github.com/adpena/codex-mcp-and-subagent-memory-leaks. Short
-version below; happy to refine or refresh anything if it helps the team.
+I've spent some time on a root-cause analysis from the `codex-rs/core/` side.
+The full writeup, repro harness, and a candidate patch are at
+https://github.com/adpena/codex-mcp-and-subagent-memory-leaks. Short version
+below; happy to refine or refresh anything if it helps the team.
 
-### Three structural defects on current `main`
+### Where #19753 lands
 
-Verified against
-[`openai/codex@80fb0704ee`](https://github.com/openai/codex/commit/80fb0704ee8b23ab7cbc3f2c4dcdbf3c1a5fbd4b)
-(and repeats verbatim on `codex-cli 0.125.0` source):
+#19753 adds `mcp_connection_manager.begin_shutdown()` to
+`session::handlers::shutdown` and to the implicit-shutdown path in
+`submission_loop`, plus extensive process-group cleanup in
+`stdio_server_launcher.rs`. That closes the "MCP servers leak past root
+shutdown" surface for the *root session's own* MCP servers.
+
+It does **not** modify `agent/registry.rs` or `agent/control.rs`, so the
+spawned-agent registry semantics are unchanged. Two structural gaps remain:
+
+### Two defects #19753 doesn't address
+
+Verified at the source level against
+[`openai/codex@80fb0704ee`](https://github.com/openai/codex/commit/80fb0704ee8b23ab7cbc3f2c4dcdbf3c1a5fbd4b):
 
 1. **Spawned-agent slot retention.** `AgentRegistry::release_spawned_thread`
    ([`registry.rs:99`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/registry.rs#L99))
@@ -40,31 +52,39 @@ Verified against
    trigger only on `CodexErr::InternalAgentDied` and explicit
    `shutdown_live_agent`. `Completed` / `Errored` finalization (mapped from
    `TurnComplete` / `TurnAborted` in `agent/status.rs`) does **not** retire a
-   slot. Finalized children continue to count against `agents.max_threads` and
-   continue to own their session resources until something else triggers
-   removal — which under recursive subagent fanout often doesn't happen until
-   shutdown.
-2. **Per-session `McpConnectionManager` ownership.** Each session's
-   `SessionServices` owns its own `McpConnectionManager`
-   ([`session/handlers.rs:884`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/session/handlers.rs#L884)),
-   so recursive spawning multiplies stdio MCP child processes. This is the
-   mechanism behind the 213-pair accumulation here — every retained child
-   session keeps its own `npm exec @playwright/mcp@latest` + `node
-   playwright-mcp` pair alive, gated by defect #1 above.
-3. **Single-pass root-session teardown.** `session::handlers::shutdown`
+   slot. Finalized children continue to count against `agents.max_threads`
+   and continue to own their session resources — including their per-session
+   `McpConnectionManager` — until something else triggers removal. Under
+   recursive subagent fanout, that doesn't happen until shutdown, which is
+   exactly the window where the 213 retained Playwright pairs in this
+   report's `vmmap` data are spawned and held.
+2. **Live-subagent descendant drain on root shutdown.**
+   `session::handlers::shutdown`
    ([`session/handlers.rs:879`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/session/handlers.rs#L879))
-   aborts tasks, shuts down the conversation / unified-exec / MCP /
-   guardian-review, and flushes thread persistence — but does not call
-   `live_thread_spawn_descendants` (which already exists at
-   [`agent/control.rs:1164`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L1164)
-   and is used elsewhere by `close_agent`). Descendants that become observable
-   mid-shutdown can outlive the root, especially under heavy recursive fanout.
+   tears down the root session's MCP / unified-exec / conversation / guardian
+   state. After #19753, MCP servers owned by the root session are also
+   explicitly shut down. But the root does not call
+   `live_thread_spawn_descendants`
+   ([`agent/control.rs:1164`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L1164)
+   — already used elsewhere by `close_agent`) to drain live spawned
+   descendants. Subagent threads that became observable mid-shutdown can
+   still outlive the root, and once they do their own MCP servers (a
+   per-session manager each — see below) survive whatever cleanup the root
+   ran.
 
-The combination, not any one alone, explains why the busiest root session is
-the first to destabilize and why the prior fix in
-[#16895](https://github.com/openai/codex/pull/16895) reduced but didn't
-eliminate the leak — it tightened parts of the cleanup path without closing
-the finalization-vs-removal gap.
+#19753's PR description notes the per-session ownership shape explicitly: it
+fixes the *root session's* MCP teardown via explicit `begin_shutdown`. Under
+recursive subagent spawning, the surviving leak surface is the *live
+descendant subagents*, each of which carries its own `McpConnectionManager`
+([`session/handlers.rs:884`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/session/handlers.rs#L884)).
+The combination of (1) finalization not retiring slots and (2) shutdown not
+draining descendants means descendants reach end-of-turn but are not actually
+torn down — and so their MCP servers, gated by their containing session's
+shutdown that never fires, persist.
+
+This is consistent with `#16895` reducing but not eliminating the leak in
+April, and with this issue's report on `0.120.0` showing 213 pairs after the
+fix.
 
 ### 30-second verification
 
@@ -79,13 +99,31 @@ git grep -n 'live_thread_spawn_descendants' codex-rs/core/src/session/
 ### Cross-platform / not just macOS
 
 The defects are in platform-agnostic Rust code (no `cfg(target_os)` guards on
-any of the seven affected files). That matches the existing reports at
+any of the affected files). That matches the existing reports at
 [#16828](https://github.com/openai/codex/issues/16828) (Linux: 49.4 GB peak,
 hard-froze a 64 GB CachyOS workstation),
 [#12414](https://github.com/openai/codex/issues/12414) (Windows 10: 90 GB
-commit growth → system OOM), and
-[#19381](https://github.com/openai/codex/issues/19381) (Windows + VS Code
-extension: 10 GB+).
+commit growth → system OOM),
+[#19381](https://github.com/openai/codex/issues/19381) (Windows app + VS Code
+extension: 10 GB+), and
+[#18103](https://github.com/openai/codex/issues/18103) (macOS + zellij /
+Ghostty, watchdog panic).
+
+### Worst-offender MCP servers in the reporter's experience
+
+Browser-automation stdio MCP servers (`@playwright/mcp`, `chrome-devtools`
+MCPs, similar) trigger the failure mode fastest, presumably because each child
+session drags a headless browser process tree along with its connection
+manager (renderer, GPU, network service). The structural defects above are
+not specific to any MCP server vendor — heavyweight servers just amplify the
+leak's RSS cost — but browser-automation servers are the most reliable
+trigger, which lines up with this report's Playwright-specific data.
+
+### Note on the released CLI
+
+`codex-cli 0.125.0` (release `rust-v0.125.0`, published 2026-04-24) predates
+the #19753 merge by four days, so users on the latest released CLI still see
+the unfixed shape for *all three* defects, not just the two above.
 
 ### What's in the repo
 

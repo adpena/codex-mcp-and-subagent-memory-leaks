@@ -13,33 +13,82 @@ without review. This repo is analysis material in the spirit of that policy — 
 fodder, not an unsolicited PR. If the team would find a PR useful, I'll open one
 when invited.
 
-## Verification against current upstream
+## Verification against current upstream (timeline)
 
-The investigation and the patch were authored against
-[`3895ddd6b`](https://github.com/openai/codex/commit/3895ddd6b1caf80cd77d6fd44e3ce55bd290ef18).
-Re-reading the same code paths against current `main`
-([`80fb0704ee`](https://github.com/openai/codex/commit/80fb0704ee8b23ab7cbc3f2c4dcdbf3c1a5fbd4b),
-685 commits later), the three structural defects are unchanged:
+This analysis has had to track a moving target — relevant fixes have been
+landing in upstream while the writeup was being prepared.
 
-- `AgentRegistry::release_spawned_thread`
+| Reference point | Commit / version | Date | Status of the three defects |
+| --- | --- | --- | --- |
+| Original investigation | [`3895ddd6b`](https://github.com/openai/codex/commit/3895ddd6b1caf80cd77d6fd44e3ce55bd290ef18) | 2026-04-12 | All three present |
+| Reporter's installed CLI | `codex-cli 0.125.0` (release `rust-v0.125.0`) | 2026-04-24 | All three present |
+| Current `main` re-read | [`80fb0704ee`](https://github.com/openai/codex/commit/80fb0704ee8b23ab7cbc3f2c4dcdbf3c1a5fbd4b) | 2026-04-28 | #1 present, #2 present, **#3 partially fixed by [#19753](https://github.com/openai/codex/pull/19753)** |
+
+[#19753](https://github.com/openai/codex/pull/19753) ("Terminate stdio MCP
+servers on shutdown to avoid process leaks", merged 2026-04-28) explicitly adds
+`mcp_connection_manager.begin_shutdown()` to `session::handlers::shutdown` and
+to the implicit-shutdown path in `submission_loop`, plus extensive
+process-group cleanup in
+[`stdio_server_launcher.rs`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/rmcp-client/src/stdio_server_launcher.rs).
+It explicitly Fixes #12491, #12976, #18881, #19469. **`codex-cli 0.125.0`
+predates this merge by four days, so the user-visible behavior on the latest
+released CLI is still the unfixed shape.**
+
+Defects on current `main` after #19753:
+
+- **#1 — Spawned-agent slot retention. Unchanged.**
+  `AgentRegistry::release_spawned_thread`
   ([`registry.rs:99`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/registry.rs#L99))
   still decrements only on metadata removal; its two callers in
-  `agent/control.rs` ([691](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L691),
+  `agent/control.rs`
+  ([691](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L691),
   [714](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L714))
-  trigger only on `InternalAgentDied` and explicit shutdown — finalized
-  `Completed` / `Errored` agents keep their slot.
-- `session::handlers::shutdown`
+  trigger only on `InternalAgentDied` and explicit `shutdown_live_agent` —
+  `Completed` / `Errored` finalization does not retire a slot. #19753 does not
+  modify `agent/registry.rs` or `agent/control.rs`.
+- **#2 — Per-session `McpConnectionManager` ownership. Architecturally
+  unchanged.**
+  Each session still owns its own connection manager
+  ([`session/handlers.rs:884`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/session/handlers.rs#L884)).
+  Recursive subagent spawning still multiplies stdio MCP child processes; the
+  fresh soak below confirms ~7 stdio MCP children per worker. #19753 mitigates
+  the *symptom* by terminating those processes more reliably at shutdown, but
+  does not redesign ownership so they aren't created in the first place per
+  recursive descendant.
+- **#3 — Single-pass root-session teardown. Partially addressed by #19753 for
+  MCP servers; the live spawned-descendant traversal is still not invoked.**
+  `session::handlers::shutdown`
   ([`session/handlers.rs:879`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/session/handlers.rs#L879))
-  does not call `live_thread_spawn_descendants` (which already exists at
-  [`control.rs:1164`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L1164)).
-- Per-session `mcp_connection_manager` ownership is unchanged.
+  now calls `mcp_connection_manager.begin_shutdown()` (good) but still does
+  not call `live_thread_spawn_descendants` (which exists at
+  [`agent/control.rs:1164`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L1164)
+  and is used elsewhere by `close_agent`). Live spawned subagent descendants
+  that become observable mid-shutdown can still outlive the root.
 
-The patch in this repo was authored against `3895ddd6b` and predates the
-`codex.rs` → `session/{handlers.rs, …}` split (commits
-[`Move codex module under session` (#18249)](https://github.com/openai/codex/pull/18249)
-and [`Split codex session modules` (#18244)](https://github.com/openai/codex/pull/18244)).
-The diff anchors need re-targeting onto current `main`; the substantive change
-is unchanged.
+### Codebase changes that affected our reproduction (not the bug)
+
+Two upstream changes between `3895ddd6b` and current `main` make the original
+soak harness less informative without adaptation:
+
+- **The `codex.rs` module was split into `session/{handlers.rs, mod.rs, …}`**
+  by [#18244](https://github.com/openai/codex/pull/18244) ("Split codex session
+  modules") and [#18249](https://github.com/openai/codex/pull/18249) ("Move
+  codex module under session"). The patch in this repo was authored against
+  the pre-split layout, so its diff anchors need re-targeting onto the new
+  paths; the substantive change is unchanged.
+- **The lifecycle log strings the soak harness greps for**
+  (`"reserved spawned-agent slot"`, `"released spawned-agent slot"`,
+  `"spawned stdio MCP server process"`, `"dropping MCP process-group guard"`)
+  **were never part of upstream openai/codex** — they were diagnostic
+  instrumentation added to the build during the original investigation but
+  not preserved in this repo's PR1 patch. Without the instrumentation, the
+  harness counters report `0` even when the underlying events occur. Process
+  sampling via `ps` still works, which is what the fresh refresh below relies
+  on.
+- **Adjacent**: [#17749](https://github.com/openai/codex/pull/17749) by
+  [@tibo-openai](https://github.com/tibo-openai)
+  ("drain mailbox only at request boundaries") sits in similar lifecycle
+  territory but does not address registry retirement or descendant drain.
 
 cc, based on recent authorship of the touched files:
 
@@ -122,10 +171,37 @@ is not the only environment affected — see "Related upstream reports" below.
 - sessions running for hours
 - ChatGPT Pro subscription, latest Codex model
 
-User-visible failure mode: cumulative. The pane with the most subagents and
-the heaviest MCP traffic flickers, janks, mis-renders, then loses `Ctrl+C`.
-Recovery attempts from neighboring panes can spread damage as agents kill
-each other's processes.
+User-visible failure mode: cumulative, in approximately the order observed:
+
+1. The pane with the most subagents and the heaviest MCP traffic begins to
+   render strangely — flicker, jank, partial / mis-rendered TUI frames.
+2. Process accounting drifts: `ps` shows growing counts of orphaned `codex`
+   and stdio MCP server children whose root session was thought to have ended.
+3. System-level allocator pressure surfaces: `memallocstack` failures appear,
+   APFS swapfile creation fails with "no space left on device" / system
+   reports memory pressure (matches [#18103](https://github.com/openai/codex/issues/18103)
+   and [#16828](https://github.com/openai/codex/issues/16828)).
+4. The contaminated pane stops responding to `Ctrl+C`. Once a pane is in this
+   state, recovery attempts from neighboring panes can spread damage —
+   surviving agents may try to kill each other's processes while reconciling.
+5. In the worst cases reported in upstream issues, the host watchdog-panics
+   ([#18103](https://github.com/openai/codex/issues/18103)) or freezes
+   entirely ([#16828](https://github.com/openai/codex/issues/16828),
+   [#16866](https://github.com/openai/codex/issues/16866)).
+
+### Worst-offender MCP servers (anecdotal)
+
+In the reporter's experience, **browser-automation stdio MCP servers
+(`@playwright/mcp`, `chrome-devtools` MCPs, similar)** trigger the cumulative
+failure mode the fastest, presumably because each child process drags a
+headless browser process tree along with it (Chromium renderer, GPU process,
+network service). [#17832](https://github.com/openai/codex/issues/17832)
+documents the same Playwright-specific failure mode quantitatively (213
+`@playwright/mcp` + `node playwright-mcp` pairs accumulating to 13.6 GB RSS
+under multi-agent workflows). The structural defects below are not specific
+to any MCP server vendor — heavyweight servers just amplify the leak's RSS
+cost — but browser-automation servers are the most reliably reproducible
+trigger.
 
 ## Related upstream reports (cross-platform)
 
