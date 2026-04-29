@@ -104,53 +104,72 @@ CODEOWNERS team: `@openai/codex-core-agent-team`.
 
 ## Summary
 
-Three behaviors compound under recursive subagent + stdio MCP load:
+Two structural defects in `codex-rs/core` cause finalized spawned subagents
+to retain registry slots and own session resources past the point they
+should have entered shutdown. After [PR #19753](https://github.com/openai/codex/pull/19753)
+(merged 2026-04-28) deterministically tears down `McpConnectionManager` for
+any session that *enters* shutdown, the remaining gap is making the
+finalized subagent enter shutdown at all:
 
-1. `Completed` / `Errored` spawned agents keep their registry slot until thread
-   metadata is removed. They count against `agents.max_threads` after they're done.
-2. Each session owns its own `McpConnectionManager`, so recursive spawning
-   multiplies stdio MCP child processes (1 worker → 7 children in the soak below).
-3. `handlers::shutdown` does a single descendant pass; descendants that become
-   observable mid-shutdown can outlive the root.
+1. **Slot retention on finalization.** `Completed` / `Errored` finalization
+   (mapped from `TurnComplete` / `TurnAborted` in `agent/status.rs`) does
+   not retire the spawned slot. A finalized subagent's session stays
+   alive, counts against `agents.max_threads`, and continues to own its
+   `McpConnectionManager` until something else triggers removal. This
+   applies to both `multi_agents` (V1) and `multi_agents_v2` (V2), via
+   different paths.
+2. **No live-descendant drain on root shutdown.**
+   `session::handlers::shutdown` doesn't call
+   `live_thread_spawn_descendants` — even though that traversal already
+   exists at `agent/control.rs:1164` and is used elsewhere by
+   `close_agent`. Subagent threads that are live mid-teardown therefore
+   never enter their own shutdown path.
+
+### Out of scope (intentionally)
+
+The architectural question of `McpConnectionManager` ownership
+(per-session as today vs. shared / lazy / pooled) is a *design* decision,
+not a *defect*. Per-session ownership produces fanout while subagents are
+**live**, not just after they're finalized; closing defect #1 above only
+shortens the post-finalization tail. Picking a new ownership shape
+deserves its own proposal where the tradeoffs (isolation,
+restart-on-config-change, resource cost) can be evaluated independently.
 
 ### Soak telemetry
 
-Original investigation, against
-[`3895ddd6b`](https://github.com/openai/codex/commit/3895ddd6b1caf80cd77d6fd44e3ce55bd290ef18),
-on the `spawn_recursive` scenario with the lifecycle hooks the harness was
-designed for:
+Provenance: the `slot_reserved`/`released`/`mcp_spawned`/`mcp_dropped`
+counters that appear in the historical summaries below come from
+diagnostic instrumentation added to a private build during the original
+investigation. **They were never part of upstream `openai/codex`.** Re-runs
+against unmodified upstream binaries produce zeros for those counters
+regardless of fix status; recovering them requires re-applying the
+diagnostic patch or wiring a new telemetry surface.
 
-| Run                                       | `slot_reserved` | `slot_released` | `mcp_spawned` | `mcp_dropped` |
-| ----------------------------------------- | --------------- | --------------- | ------------- | ------------- |
-| Clean upstream `3895ddd6b`                | 6               | **0**           | 7             | 7             |
-| Patched, run 1                            | 6               | **4**           | 7             | 6             |
-| Patched, run 2                            | 6               | **5**           | 7             | 7             |
+| Provenance | Run                                       | `slot_reserved` | `slot_released` | `mcp_spawned` | `mcp_dropped` |
+| ---------- | ----------------------------------------- | --------------- | --------------- | ------------- | ------------- |
+| Investigation, `3895ddd6b` + diagnostic build | Clean upstream | 6 | **0** | 7 | 7 |
+| Investigation, `3895ddd6b` + patch + diagnostic build | Patched, run 1 | 6 | **4** | 7 | 6 |
+| Investigation, `3895ddd6b` + patch + diagnostic build | Patched, run 2 | 6 | **5** | 7 | 7 |
 
-Refresh against current `codex-cli 0.125.0` (6 workers × 90 s, summary at
+Refresh attempt against `codex-cli 0.125.0` (6 workers × 90 s, summary at
 [`artifacts/soak-summaries/current-main-20260428-212049/`](artifacts/soak-summaries/current-main-20260428-212049/)):
+the harness's SSE fixture drove `function_call: spawn_agent` events that
+the tool router rejected as `unsupported call: spawn_agent` (50,292
+rejections in `worker-00` alone) because `spawn_agent` registration is now
+gated behind explicit `[agents]` or `features.multi_agent_v2` config that
+the harness wasn't setting. The 44 stdio MCP children across 6 workers
+visible during the run come from each session's eager
+`McpConnectionManager` startup at session creation — they confirm
+*per-session MCP startup* exists, **not** that recursive subagent fanout
+or slot retention are observable end-to-end.
 
-- The `CODEX_DEBUG_AGENT_LIFECYCLE` / `CODEX_DEBUG_MCP_LIFECYCLE` /
-  `CODEX_DEBUG_THREAD_LISTENERS` env vars and the corresponding lifecycle log
-  strings (`"reserved spawned-agent slot"`, etc.) have been removed in
-  upstream, so the slot/MCP counters report `0` across the board on the new
-  CLI — the harness needs new telemetry hooks to recover those counts.
-- `spawn_agent` is now feature-gated; the SSE fixture used by the harness
-  drives `function_call: spawn_agent` events that the new tool router
-  rejects as `unsupported call: spawn_agent` (50,292 such errors in
-  `worker-00` alone). The harness needs a config flag or fixture update to
-  drive the V1/V2 handler on current `main`.
-- What remains visible in the refresh:
-  - **44 stdio MCP child processes across 6 workers (≈7 per worker)** during
-    steady state, sampled by `ps`. This confirms **defect #2 (per-session
-    `McpConnectionManager` fanout) is still present in `0.125.0`.**
-  - During shutdown the launcher emits
-    `Failed to terminate MCP process group … No such process` warnings,
-    suggesting the cleanup path races with process-group teardown.
-- Defects #1 (slot retention) and #3 (root-shutdown drain) require working
-  recursive `spawn_agent` to manifest behaviorally. With the current harness
-  blocked on the gating change, the verification for those defects is the
-  source-level analysis below plus the suggested unit tests in
-  [`artifacts/upstream-issue-draft.md`](artifacts/upstream-issue-draft.md).
+The harness has since been updated to set the right config (`--agent-path
+v1|v2`, `--max-threads N`); see
+[`artifacts/soak_codex_concurrency.py`](artifacts/soak_codex_concurrency.py).
+Re-running against the patched binary on the
+[`fix/subagent-retention-after-19753`](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/tree/main/codex)
+branch is in progress; results land in
+[`artifacts/soak-summaries/`](artifacts/soak-summaries/) as they complete.
 
 Raw summaries:
 [`artifacts/soak-summaries/`](artifacts/soak-summaries/).

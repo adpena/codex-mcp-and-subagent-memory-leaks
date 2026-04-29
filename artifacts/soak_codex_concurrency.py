@@ -106,6 +106,29 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="enable verbose lifecycle logging inside Codex",
     )
+    parser.add_argument(
+        "--agent-path",
+        choices=("v1", "v2"),
+        default="v1",
+        help=(
+            "Multi-agent tool surface to enable in the worker config. v1 sets "
+            "[agents] max_threads (legacy multi_agents handlers); v2 sets "
+            "features.multi_agent_v2.enabled (newer multi_agents_v2 handlers). "
+            "Without one of these, spawn_agent function calls from the SSE "
+            "fixture are rejected as 'unsupported call: spawn_agent' on "
+            "current openai/codex."
+        ),
+    )
+    parser.add_argument(
+        "--max-threads",
+        type=int,
+        default=4,
+        help=(
+            "Concurrent-spawn cap for the worker's session. Maps to "
+            "[agents].max_threads (v1) or "
+            "features.multi_agent_v2.max_concurrent_threads_per_session (v2)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -120,8 +143,26 @@ def ensure_binary(path: pathlib.Path, package: str, binary: str) -> pathlib.Path
     return path
 
 
-def make_config(codex_home: pathlib.Path, stdio_server_bin: pathlib.Path) -> None:
-    config = textwrap.dedent(
+def make_config(
+    codex_home: pathlib.Path,
+    stdio_server_bin: pathlib.Path,
+    agent_path: str,
+    max_threads: int,
+) -> None:
+    """Write a Codex config that exposes the requested multi-agent surface.
+
+    `agent_path` is "v1" or "v2".
+
+    On the original investigation point (`3895ddd6b`), the soak harness
+    relied on multi_agents tool handlers being registered by default. Since
+    then, registration moved behind explicit configuration: V1 needs an
+    `[agents]` table, V2 needs `features.multi_agent_v2.enabled`. Without
+    one of those, the SSE fixture's `function_call: spawn_agent` events are
+    rejected by the tool router as `unsupported call: spawn_agent`, and the
+    soak never drives the recursive-subagent code path it was designed to
+    exercise.
+    """
+    base = textwrap.dedent(
         f"""
         model_provider = "openai"
         approval_policy = "never"
@@ -135,7 +176,30 @@ def make_config(codex_home: pathlib.Path, stdio_server_bin: pathlib.Path) -> Non
         tool_timeout_sec = 300
         """
     ).strip()
-    (codex_home / "config.toml").write_text(config + "\n", encoding="utf-8")
+
+    if agent_path == "v1":
+        agent_section = textwrap.dedent(
+            f"""
+            [agents]
+            max_threads = {max_threads}
+            max_depth = 4
+            """
+        ).strip()
+    elif agent_path == "v2":
+        agent_section = textwrap.dedent(
+            f"""
+            [features.multi_agent_v2]
+            enabled = true
+            max_concurrent_threads_per_session = {max_threads}
+            """
+        ).strip()
+    else:
+        raise ValueError(
+            f"unsupported agent_path={agent_path!r}; expected 'v1' or 'v2'"
+        )
+
+    config = f"{base}\n\n{agent_section}\n"
+    (codex_home / "config.toml").write_text(config, encoding="utf-8")
 
 
 def fixture_events_for_scenario(scenario: str) -> list[dict]:
@@ -195,11 +259,13 @@ def start_worker(
     codex_bin: pathlib.Path,
     stdio_server_bin: pathlib.Path,
     debug_lifecycle: bool,
+    agent_path: str,
+    max_threads: int,
 ) -> Worker:
     name = f"worker-{index:02d}"
     codex_home = out_dir / name / "codex_home"
     codex_home.mkdir(parents=True, exist_ok=True)
-    make_config(codex_home, stdio_server_bin)
+    make_config(codex_home, stdio_server_bin, agent_path, max_threads)
 
     fixture_path = out_dir / name / f"{scenario}.sse"
     write_fixture(fixture_path, scenario)
@@ -390,6 +456,8 @@ def main() -> int:
                 codex_bin,
                 stdio_server_bin,
                 args.debug_lifecycle,
+                args.agent_path,
+                args.max_threads,
             )
             workers.append(worker)
             print(
