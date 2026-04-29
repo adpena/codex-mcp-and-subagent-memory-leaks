@@ -1,21 +1,3 @@
-# Draft: comment on openai/codex#17832
-
-This is the draft body for a comment on
-[openai/codex#17832](https://github.com/openai/codex/issues/17832) — currently
-the most concrete active thread on the subagent / MCP teardown leak. The repo
-at https://github.com/adpena/codex-mcp-and-subagent-memory-leaks is the durable
-artifact; this comment is the targeted handoff into the existing discussion.
-
-The comment below is intended to address jroth1111's request on
-[#18103](https://github.com/openai/codex/issues/18103) — "I'd want confirmation
-that the root cause has been identified and a fix is in progress" — by giving
-the team a concrete, source-level root-cause hypothesis rather than another
-symptom report.
-
----
-
-## Comment body
-
 Thank you for the detailed forensic data here — the 213-pair Playwright leak
 breakdown and the `vmmap` analysis make the failure mode much easier to reason
 about. I noticed [#19753](https://github.com/openai/codex/pull/19753) was
@@ -222,16 +204,3 @@ useful, I'd be glad to follow the invitation process and re-target it onto
 current `main`.
 
 — Alejandro Pena ([@adpena](https://github.com/adpena))
-
----
-
-## Submission command
-
-```bash
-gh issue comment 17832 \
-  --repo openai/codex \
-  --body-file artifacts/comment-on-17832-body.md
-```
-
-(`comment-on-17832-body.md` should be a clean copy of just the comment body —
-without the wrapper instructions and `## Comment body` heading above.)
