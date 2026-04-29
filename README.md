@@ -331,21 +331,13 @@ PR2 follow-up tracks in [`artifacts/pr1-pr2-plan.md`](artifacts/pr1-pr2-plan.md)
 
 ## Verification
 
-All on the patched branch against `3895ddd6b`.
+The canonical-patch verification results (against `openai/codex@80fb0704ee`,
+on branch `fix/subagent-retention-after-19753`) are summarized in the
+"Patch" section above. This section captures supplementary observations.
 
-```bash
-cargo test -p codex-core resume_agent_respects_max_threads_limit -- --nocapture
-cargo test -p codex-core spawn_agent_releases_slot_after_completion -- --nocapture
-cargo test -p codex-core root_shutdown_shuts_down_live_spawned_descendants -- --nocapture
-cargo test -p codex-core failed_spawn_releases_reserved_nickname -- --nocapture
-cargo fmt --all
-cargo clippy -p codex-core --tests -- -D warnings
-git diff --check
-cargo test -p codex-tui
-cargo build -p codex-cli --bin codex
-```
+### Strict-provenance Miri (run on the original investigation branch)
 
-Strict-provenance Miri (nightly, macOS arm64):
+Run on the `3895ddd6b` patched branch (nightly, macOS arm64):
 
 ```bash
 MIRIFLAGS='-Zmiri-strict-provenance -Zmiri-disable-isolation' \
@@ -354,27 +346,34 @@ MIRIFLAGS='-Zmiri-strict-provenance -Zmiri-disable-isolation' \
   cargo +nightly miri test -p codex-core --lib failed_spawn_releases_reserved_nickname
 ```
 
-The `cfg(miri)` guards in `tests/common/lib.rs` and `tests/suite/mod.rs` no-op
-test-startup helpers that do `realpath` / `chmod` / `PATH` mutation, which
-strict-provenance Miri rejects before reaching the lifecycle code. Tokio handler
-tests are still blocked under macOS Miri by unsupported `kqueue` calls — a
-pre-existing platform limitation, unrelated to this patch.
+Both passed. These results have not been re-run on the canonical
+`80fb0704ee` re-target — happy to refresh on request. The `cfg(miri)` guards
+in `tests/common/lib.rs` and `tests/suite/mod.rs` no-op test-startup helpers
+that do `realpath` / `chmod` / `PATH` mutation, which strict-provenance Miri
+rejects before reaching the lifecycle code. Tokio handler tests remain
+blocked under macOS Miri by unsupported `kqueue` calls — a pre-existing
+platform limitation, unrelated to this patch.
 
-### Pre-existing failures (verified unrelated)
+### Pre-existing failures observed on the original branch (verified unrelated)
 
-A full `cargo test -p codex-core` surfaces three `tests/all.rs` failures:
+These were observed during the original investigation against `3895ddd6b`,
+not on the canonical re-target. They reproduce on a clean upstream clone at
+the same commit, so they are unrelated to the patch:
 
 - `suite::realtime_conversation::conversation_webrtc_start_posts_generated_session`
-  — fails the same way on a clean upstream clone.
+  — fails the same way on clean upstream `3895ddd6b`.
 - `suite::subagent_notifications::subagent_notification_is_included_without_wait`
-  — passes in isolation on both branches; long-suite interaction.
+  — passes in isolation on both the patched and clean upstream branches at
+  `3895ddd6b`; long-suite interaction.
 - `suite::cli_stream::responses_mode_stream_cli_supports_openai_base_url_config_override`
-  — passes in isolation on the patched branch.
+  — passes in isolation on the patched `3895ddd6b` branch.
+- `cargo test -p codex-app-server` was red in
+  `realtime_webrtc_start_emits_sdp_notification` and
+  `webrtc_v1_start_posts_offer_returns_sdp_and_joins_sideband`; both
+  reproduced on clean upstream `3895ddd6b`.
 
-`cargo test -p codex-app-server` is red in two realtime conversation tests
-(`realtime_webrtc_start_emits_sdp_notification`,
-`webrtc_v1_start_posts_offer_returns_sdp_and_joins_sideband`); both reproduce on
-clean upstream.
+These observations are unverified against current `main` and may have been
+fixed since.
 
 ## Apply
 

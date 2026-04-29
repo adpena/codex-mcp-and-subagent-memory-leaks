@@ -36,14 +36,14 @@ Two upstream properties matter most:
 1. Spawned agents reserve a slot in the shared agent registry and historically only released it on explicit shutdown/close or hard death.
 
    Relevant code:
-   - [codex-rs/core/src/agent/registry.rs](/Users/adpena/Projects/chodex/codex/codex-rs/core/src/agent/registry.rs)
-   - [codex-rs/core/src/agent/control.rs](/Users/adpena/Projects/chodex/codex/codex-rs/core/src/agent/control.rs)
+   - [codex-rs/core/src/agent/registry.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/core/src/agent/registry.rs)
+   - [codex-rs/core/src/agent/control.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/core/src/agent/control.rs)
 
 2. Each session owns its own `SessionServices`, including its own `McpConnectionManager`.
 
    Relevant code:
-   - [codex-rs/core/src/state/service.rs](/Users/adpena/Projects/chodex/codex/codex-rs/core/src/state/service.rs)
-   - [codex-rs/core/src/codex.rs](/Users/adpena/Projects/chodex/codex/codex-rs/core/src/codex.rs)
+   - [codex-rs/core/src/state/service.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/core/src/state/service.rs)
+   - [codex-rs/core/src/codex.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/core/src/codex.rs)
 
 That means recursive subagent spawning can multiply MCP child processes quickly.
 
@@ -52,7 +52,7 @@ That means recursive subagent spawning can multiply MCP child processes quickly.
 ### 1. Hostile soak driver
 
 Script:
-- [scripts/soak_codex_concurrency.py](/Users/adpena/Projects/chodex/codex/scripts/soak_codex_concurrency.py)
+- [scripts/soak_codex_concurrency.py](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/scripts/soak_codex_concurrency.py)
 
 Purpose:
 - launch many `codex exec` sessions concurrently
@@ -89,7 +89,7 @@ Example run:
 ### 2. Hanging stdio MCP tool
 
 Test server:
-- [codex-rs/rmcp-client/src/bin/test_stdio_server.rs](/Users/adpena/Projects/chodex/codex/codex-rs/rmcp-client/src/bin/test_stdio_server.rs)
+- [codex-rs/rmcp-client/src/bin/test_stdio_server.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/rmcp-client/src/bin/test_stdio_server.rs)
 
 Added behavior:
 - `hang` tool never returns
@@ -97,13 +97,13 @@ Added behavior:
 
 ### 3. Focused repro tests
 
-- [codex-rs/rmcp-client/tests/stdio_timeout_recovery.rs](/Users/adpena/Projects/chodex/codex/codex-rs/rmcp-client/tests/stdio_timeout_recovery.rs)
+- [codex-rs/rmcp-client/tests/stdio_timeout_recovery.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/rmcp-client/tests/stdio_timeout_recovery.rs)
   - verifies isolated stdio timeout behavior at the `rmcp-client` layer
 
-- [codex-rs/app-server/tests/suite/v2/mcp_shutdown.rs](/Users/adpena/Projects/chodex/codex/codex-rs/app-server/tests/suite/v2/mcp_shutdown.rs)
+- [codex-rs/app-server/tests/suite/v2/mcp_shutdown.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/app-server/tests/suite/v2/mcp_shutdown.rs)
   - verifies app-server shutdown behavior with a hanging stdio MCP call
 
-- [codex-rs/tui/tests/suite/mcp_hang_interrupt.rs](/Users/adpena/Projects/chodex/codex/codex-rs/tui/tests/suite/mcp_hang_interrupt.rs)
+- [codex-rs/tui/tests/suite/mcp_hang_interrupt.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/tui/tests/suite/mcp_hang_interrupt.rs)
   - PTY-oriented terminal-surface repro for `codex exec` plus hanging MCP
 
 ## Observed Baselines Before the Fix
@@ -111,7 +111,7 @@ Added behavior:
 ### Recursive spawn soak
 
 Run output:
-- [summary.json](/Users/adpena/Projects/chodex/codex/.tmp/codex-soak-t8ajzcj7/summary.json)
+- [summary.json](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/.tmp/codex-soak-t8ajzcj7/summary.json)
 
 Key observation:
 
@@ -135,8 +135,8 @@ Interpretation:
 ### Mixed soak
 
 Run output:
-- [summary.json](/Users/adpena/Projects/chodex/codex/.tmp/codex-soak-4xp1gofy/summary.json)
-- [summary.json](/Users/adpena/Projects/chodex/codex/.tmp/codex-soak-5pgdag12/summary.json)
+- [summary.json](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/.tmp/codex-soak-4xp1gofy/summary.json)
+- [summary.json](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/.tmp/codex-soak-5pgdag12/summary.json)
 
 Key observation:
 
@@ -187,11 +187,11 @@ Implemented so far:
    one-shot descendant snapshot.
 
 Touched code:
-- [codex-rs/core/src/agent/registry.rs](/Users/adpena/Projects/chodex/codex/codex-rs/core/src/agent/registry.rs)
-- [codex-rs/core/src/agent/control.rs](/Users/adpena/Projects/chodex/codex/codex-rs/core/src/agent/control.rs)
-- [codex-rs/core/src/codex.rs](/Users/adpena/Projects/chodex/codex/codex-rs/core/src/codex.rs)
-- [codex-rs/core/src/tools/handlers/multi_agents/wait.rs](/Users/adpena/Projects/chodex/codex/codex-rs/core/src/tools/handlers/multi_agents/wait.rs)
-- [codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs](/Users/adpena/Projects/chodex/codex/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs)
+- [codex-rs/core/src/agent/registry.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/core/src/agent/registry.rs)
+- [codex-rs/core/src/agent/control.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/core/src/agent/control.rs)
+- [codex-rs/core/src/codex.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/core/src/codex.rs)
+- [codex-rs/core/src/tools/handlers/multi_agents/wait.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/core/src/tools/handlers/multi_agents/wait.rs)
+- [codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs](/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/core/src/tools/handlers/multi_agents/resume_agent.rs)
 
 Intent:
 

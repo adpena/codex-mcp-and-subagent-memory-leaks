@@ -21,15 +21,15 @@ Files in PR1:
 
 The defect being fixed is present in clean upstream, not just in the working tree:
 
-- in the clean clone at `/Users/adpena/Projects/chodex/codex-pr2`, `AgentRegistry::release_spawned_thread(...)` still decrements slot ownership only when thread metadata is removed, with no retirement path or cached final status
+- in the clean clone at `/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex`, `AgentRegistry::release_spawned_thread(...)` still decrements slot ownership only when thread metadata is removed, with no retirement path or cached final status
 - in the clean clone, `AgentControl::get_status(...)` still returns `NotFound` as soon as the live thread is gone
 - in the clean clone, `handlers::shutdown(...)` still shuts down only the current session and does not perform descendant drain sweeps before clearing local resources
 
 Relevant clean-upstream code examined:
 
-- `codex-pr2/codex-rs/core/src/agent/registry.rs`
-- `codex-pr2/codex-rs/core/src/agent/control.rs`
-- `codex-pr2/codex-rs/core/src/codex.rs`
+- `codex-rs/core/src/agent/registry.rs`
+- `codex-rs/core/src/agent/control.rs`
+- `codex-rs/core/src/codex.rs`
 
 This means PR1 is correcting behavior that still exists in upstream `main`.
 
@@ -351,14 +351,14 @@ Downstream anomaly currently observed:
   - `suite::v2::realtime_conversation::webrtc_v1_start_posts_offer_returns_sdp_and_joins_sideband`
 
 Why this is currently treated as unrelated to PR1:
-- `suite::realtime_conversation::conversation_webrtc_start_posts_generated_session` fails the same way on the clean upstream clone in `/Users/adpena/Projects/chodex/codex-pr2`
+- `suite::realtime_conversation::conversation_webrtc_start_posts_generated_session` fails the same way on the clean upstream clone in `/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex`
 - `suite::subagent_notifications::subagent_notification_is_included_without_wait` passes in isolation on both the PR1 branch and the clean upstream clone, which points to suite interaction / flakiness rather than a deterministic PR1 regression
 - `suite::cli_stream::responses_mode_stream_cli_supports_openai_base_url_config_override` passes in isolation on the PR1 branch
 - failure is in realtime multipart request body expectations
 - PR1 does not touch realtime conversation code paths
 - failing diffs are request-body ordering / serialization expectations in app-server realtime tests
-- `suite::v2::realtime_conversation::realtime_webrtc_start_emits_sdp_notification` fails the same way on the clean upstream clone in `/Users/adpena/Projects/chodex/codex-pr2`
-- `suite::v2::realtime_conversation::webrtc_v1_start_posts_offer_returns_sdp_and_joins_sideband` also fails the same way on the clean upstream clone in `/Users/adpena/Projects/chodex/codex-pr2`
+- `suite::v2::realtime_conversation::realtime_webrtc_start_emits_sdp_notification` fails the same way on the clean upstream clone in `/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex`
+- `suite::v2::realtime_conversation::webrtc_v1_start_posts_offer_returns_sdp_and_joins_sideband` also fails the same way on the clean upstream clone in `/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex`
 
 ## Residual PR1 Risk Summary
 
