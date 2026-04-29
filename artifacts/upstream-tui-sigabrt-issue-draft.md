@@ -31,7 +31,7 @@ N/A — test-binary failure, no model interaction.
 
 ## What terminal emulator and version are you using?
 
-Ghostty 1.3.1 (incidental — failure is in cargo test runner, not interactive)
+Ghostty 1.3.1
 
 ## What issue are you seeing?
 
@@ -81,7 +81,7 @@ Possible causes worth investigating:
 - A `tokio::Runtime::shutdown_*` interaction aborting under specific test interleavings.
 - An `assert!` in unsafe code path (transmute, raw FFI) short-circuiting via abort rather than panic.
 
-A core dump or `RUST_BACKTRACE=full` capture from a reproducing run would narrow this down quickly. Happy to attach one if useful.
+`RUST_BACKTRACE=full` and core-dump capture available on request.
 
 Build: `cargo +1.93.0-aarch64-apple-darwin test`, default debug profile.
 

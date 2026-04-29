@@ -11,12 +11,12 @@ Cross-platform reports: [#16828](https://github.com/openai/codex/issues/16828) (
 
 ## Suggested fix
 
-Topic branch [`fix/subagent-retention-after-19753`](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/tree/main/codex), patch [`pr1-subagent-retention-after-19753.patch`](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/blob/main/patches/pr1-subagent-retention-after-19753.patch) (applies cleanly on top of `80fb0704ee`):
+Patch: [`pr1-subagent-retention-after-19753.patch`](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/blob/main/patches/pr1-subagent-retention-after-19753.patch).
 
-- `AgentMetadata.slot_state: SlotState` (`NotTracked` / `Active` / `Retired { last_status }`), replacing the prior `slot_active: bool` + `last_status: Option<AgentStatus>` so the lifecycle is explicit in the type system.
-- `AgentRegistry::retire_spawned_thread(id, status)` transitions `Active → Retired`, decrements `total_count` once. Idempotent under repeated retire / interleaved release.
-- `AgentControl::retire_finalized_agent` flushes rollout, enqueues `Op::Shutdown` on the session's submission channel (so the session loop drains it into `handlers::shutdown`, picking up #19753's `begin_shutdown()`), removes the live thread, and retires the registry slot. Invoked from V1's `maybe_start_completion_watcher` and from V2's `Session::maybe_notify_parent_of_terminal_turn` via `tokio::spawn` — synchronous V2 invocation self-deadlocks because the call site runs inside `Session::send_event` and the bounded submission channel's receiver is the same loop. The completion watcher and V2 path retire only `Completed` / `Errored`. `Shutdown` is intentionally not retired (regressed an existing resume-path test).
-- `get_status` / `wait_agent` / `list_agents` fall back to cached registry status when no live thread exists. `resume_agent` switches to `has_live_thread()` instead of treating any non-`NotFound` status as proof of non-resumability.
+- `AgentMetadata.slot_state: SlotState` (`NotTracked` / `Active` / `Retired { last_status }`), replacing `slot_active: bool` + `last_status: Option<AgentStatus>`.
+- `AgentRegistry::retire_spawned_thread(id, status)` transitions `Active → Retired` and decrements `total_count` once. Idempotent under repeated retire / interleaved release.
+- `AgentControl::retire_finalized_agent` flushes rollout, enqueues `Op::Shutdown`, removes the thread, retires the slot. Invoked from V1's `maybe_start_completion_watcher` and from V2's `Session::maybe_notify_parent_of_terminal_turn` via `tokio::spawn` (synchronous V2 call self-deadlocks: `Session::send_event` is the same loop the submission channel's receiver is on). Retires only `Completed` / `Errored`; `Shutdown` is intentionally left alone (regressed an existing resume-path test).
+- `get_status` / `wait_agent` / `list_agents` fall back to cached registry status when no live thread exists. `resume_agent` switches to `has_live_thread()` rather than treating any non-`NotFound` status as proof of non-resumability.
 - `SpawnReservation::Drop` releases the reserved nickname when spawn setup fails before commit.
 
 ## Verification
@@ -50,17 +50,17 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1650 filtered out; f
 $ cargo test -p codex-core --lib release_after_retire_does_not_double_decrement
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1650 filtered out; finished in 0.00s
 
-$ cargo test -p codex-core --lib   # workspace-equivalent for the changed crate
+$ cargo test -p codex-core --lib
 test result: ok. 1648 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 31.68s
 ```
 
-`cargo test --workspace --no-fail-fast` on the same fresh clone surfaces three target-level failures, **verified pre-existing on `origin/main` without the patch**:
+`cargo test --workspace --no-fail-fast` surfaces three target-level failures unrelated to this patch — all reproduce on plain `origin/main`:
 
-- Two `codex-exec-server::server::handler::tests` (`long_poll_read_fails_after_session_resume`, `output_and_exit_are_retained_after_notification_receiver_closes`) — fail under workspace parallel-test contention; pass when re-run individually on either branch.
-- `codex-tui --lib` SIGABRT (`signal: 6, SIGABRT: process abort signal`) after ~2009-2018 tests, **reproduced identically on plain `origin/main`** with no patch applied. macOS, 128 GB RAM, no swap pressure, default ulimits. Process aborts mid-run with no panic stack; the last test printed varies per run.
+- `codex-exec-server::server::handler::tests::{long_poll_read_fails_after_session_resume, output_and_exit_are_retained_after_notification_receiver_closes}` — fail under workspace parallel-test contention, pass individually on either branch.
+- `codex-tui --lib` SIGABRT (`signal: 6`) after ~2009 tests, no panic stack, last test varies per run. Reproduces on plain `80fb0704ee` with no patch. Filed separately.
 - `codex-core::suite::approvals::approval_matrix_covers_group::workspace_write` exceeds the 60s soft timeout under workspace load; passes individually.
 
-The SIGABRT in particular is a real test-stability bug worth tracking independently. None of the failures touch any file this patch modifies, and `git grep -nE 'slot_active|\.last_status|slot_state|retire_finalized_agent' codex-rs/tui/` returns zero matches.
+`git grep -nE 'slot_active|\.last_status|slot_state|retire_finalized_agent' codex-rs/tui/` returns zero matches.
 
 ### Failing-then-passing demonstration
 
@@ -95,14 +95,14 @@ completed V2 child should be retired: Elapsed(())
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1652 filtered out; finished in 10.37s
 ```
 
-Restore both calls and the tests pass in <1s. The 10-second `Elapsed(())` is the test's `timeout(Duration::from_secs(10), …)` waiting for retirement.
+Restore each call and the test passes in <1s.
 
 ## Scope
 
-This patch addresses one defect: slot retention on `Completed` / `Errored` finalization. An earlier draft also added a descendant-drain in `session::handlers::shutdown` to clean up live spawned descendants when a root session shuts down without going through `ThreadManager::shutdown_all_threads_bounded`. That implementation raced destructively with the bulk-shutdown loop — both paths called `shutdown_live_agent` on the same descendants in parallel, leaving the rollout writer in a state that `resume_agent_from_rollout` couldn't recover from. The two failing regression tests
+One defect: slot retention on `Completed` / `Errored` finalization. A descendant-drain in `session::handlers::shutdown` (to clean up live spawned descendants when a root session shuts down outside `ThreadManager::shutdown_all_threads_bounded`) was prototyped and removed: it raced destructively with the bulk-shutdown loop — both paths called `shutdown_live_agent` on the same descendants in parallel, leaving the rollout writer in a state that `resume_agent_from_rollout` couldn't recover from
 ([`resume_agent_from_rollout_reopens_open_descendants_after_manager_shutdown`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control_tests.rs#L2467),
-[`resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_source_is_stale`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control_tests.rs#L2558))
-surface the regression. Cleanly fixing the descendant-drain needs cooperation with `ThreadManager` so the two paths agree on cleanup authority — that's larger than this patch.
+[`resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_source_is_stale`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control_tests.rs#L2558)).
+A clean fix needs cooperation with `ThreadManager` on cleanup authority — larger than this patch.
 
 ## Not addressed by this patch
 
@@ -111,6 +111,6 @@ surface the regression. Cleanly fixing the descendant-drain needs cooperation wi
 - `Shutdown` participation in retirement (regresses an existing resume-path test).
 - Integration test asserting MCP child PIDs terminate on retirement (skeleton at [`artifacts/integration-test-skeleton.md`](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/blob/main/artifacts/integration-test-skeleton.md), would mirror #19753's `process_group_cleanup.rs`).
 
-Read [`docs/contributing.md`](https://github.com/openai/codex/blob/main/docs/contributing.md). Offered as analysis material; not opening a PR. Will follow the invitation process if useful.
+Per [`docs/contributing.md`](https://github.com/openai/codex/blob/main/docs/contributing.md), this is offered as analysis. Happy to follow the invitation process if useful.
 
 — Alejandro Pena ([@adpena](https://github.com/adpena))
