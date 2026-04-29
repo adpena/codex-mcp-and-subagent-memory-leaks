@@ -54,7 +54,13 @@ $ cargo test -p codex-core --lib   # workspace-equivalent for the changed crate
 test result: ok. 1648 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 31.68s
 ```
 
-`cargo test --workspace --no-fail-fast` on the same fresh clone surfaces three target-level failures, all in code untouched by this patch and reproducible on `origin/main` without the patch when run under parallel-test contention: two `codex-exec-server::server::handler::tests` (`long_poll_read_fails_after_session_resume`, `output_and_exit_are_retained_after_notification_receiver_closes`) — both pass when re-run individually; a `codex-tui --lib` SIGABRT after 2018 tests (process-level abort, no specific test); and `codex-core::suite::approvals::approval_matrix_covers_group::workspace_write` exceeding the 60s soft timeout. None of these touch `agent/`, `session/handlers.rs`, or any other file the patch modifies.
+`cargo test --workspace --no-fail-fast` on the same fresh clone surfaces three target-level failures, **verified pre-existing on `origin/main` without the patch**:
+
+- Two `codex-exec-server::server::handler::tests` (`long_poll_read_fails_after_session_resume`, `output_and_exit_are_retained_after_notification_receiver_closes`) — fail under workspace parallel-test contention; pass when re-run individually on either branch.
+- `codex-tui --lib` SIGABRT (`signal: 6, SIGABRT: process abort signal`) after ~2009-2018 tests, **reproduced identically on plain `origin/main`** with no patch applied. macOS, 128 GB RAM, no swap pressure, default ulimits. Process aborts mid-run with no panic stack; the last test printed varies per run.
+- `codex-core::suite::approvals::approval_matrix_covers_group::workspace_write` exceeds the 60s soft timeout under workspace load; passes individually.
+
+The SIGABRT in particular is a real test-stability bug worth tracking independently. None of the failures touch any file this patch modifies, and `git grep -nE 'slot_active|\.last_status|slot_state|retire_finalized_agent' codex-rs/tui/` returns zero matches.
 
 ### Failing-then-passing demonstration
 
