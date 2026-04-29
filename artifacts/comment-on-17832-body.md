@@ -49,7 +49,12 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1650 filtered out; f
 
 $ cargo test -p codex-core --lib release_after_retire_does_not_double_decrement
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1650 filtered out; finished in 0.00s
+
+$ cargo test -p codex-core --lib   # workspace-equivalent for the changed crate
+test result: ok. 1648 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 31.68s
 ```
+
+`cargo test --workspace --no-fail-fast` on the same fresh clone surfaces three target-level failures, all in code untouched by this patch and reproducible on `origin/main` without the patch when run under parallel-test contention: two `codex-exec-server::server::handler::tests` (`long_poll_read_fails_after_session_resume`, `output_and_exit_are_retained_after_notification_receiver_closes`) — both pass when re-run individually; a `codex-tui --lib` SIGABRT after 2018 tests (process-level abort, no specific test); and `codex-core::suite::approvals::approval_matrix_covers_group::workspace_write` exceeding the 60s soft timeout. None of these touch `agent/`, `session/handlers.rs`, or any other file the patch modifies.
 
 ### Failing-then-passing demonstration
 
