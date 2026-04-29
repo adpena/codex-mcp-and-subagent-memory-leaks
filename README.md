@@ -3,9 +3,23 @@
 Investigation, reproducible soak, and a `codex-core` patch for the long-session
 degradation seen on macOS under recursive subagents and stdio MCP fanout.
 
-cc [@tibo-openai](https://github.com/tibo-openai) [@embirico](https://github.com/embirico) — sanity check welcome on the
-direction in [`patches/pr1-subagent-retention-root-teardown.patch`](patches/pr1-subagent-retention-root-teardown.patch).
-If the call is right, I'll open it as a PR against `openai/codex`.
+Per [`openai/codex`'s contributing policy](https://github.com/openai/codex/blob/main/docs/contributing.md),
+external code contributions are by invitation only and unsolicited PRs are closed
+without review. This repo is analysis material in the spirit of that policy — issue
+fodder, not an unsolicited PR. If the team would find a PR useful, I'll open one
+when invited.
+
+cc, based on recent authorship of the touched files:
+
+- [@jif-oai](https://github.com/jif-oai) — primary author on `core/src/agent/control.rs`
+  and `core/src/tools/handlers/multi_agents/`
+- [@pakrym-oai](https://github.com/pakrym-oai) — primary author on
+  `core/src/codex.rs` (shutdown handlers)
+- [@bolinfest](https://github.com/bolinfest) — broad ownership across `codex-rs/core/`
+- [@tibo-openai](https://github.com/tibo-openai) — author of the adjacent mailbox PR
+  [#17749](https://github.com/openai/codex/pull/17749)
+
+CODEOWNERS team: `@openai/codex-core-agent-team`.
 
 ## Summary
 
