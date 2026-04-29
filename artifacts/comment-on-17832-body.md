@@ -57,7 +57,7 @@ test result: ok. 1648 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; f
 `cargo test --workspace --no-fail-fast` surfaces three target-level failures unrelated to this patch — all reproduce on plain `origin/main`:
 
 - `codex-exec-server::server::handler::tests::{long_poll_read_fails_after_session_resume, output_and_exit_are_retained_after_notification_receiver_closes}` — fail under workspace parallel-test contention, pass individually on either branch.
-- `codex-tui --lib` SIGABRT (`signal: 6`) after ~2009 tests, no panic stack, last test varies per run. Reproduces on plain `80fb0704ee` with no patch. Filed separately.
+- `codex-tui --lib` SIGABRT (`signal: 6`) after ~2009 tests, no panic stack, last test varies per run. Reproduces on plain `80fb0704ee` with no patch.
 - `codex-core::suite::approvals::approval_matrix_covers_group::workspace_write` exceeds the 60s soft timeout under workspace load; passes individually.
 
 `git grep -nE 'slot_active|\.last_status|slot_state|retire_finalized_agent' codex-rs/tui/` returns zero matches.
@@ -111,6 +111,6 @@ A clean fix needs cooperation with `ThreadManager` on cleanup authority — larg
 - `Shutdown` participation in retirement (regresses an existing resume-path test).
 - Integration test asserting MCP child PIDs terminate on retirement (skeleton at [`artifacts/integration-test-skeleton.md`](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/blob/main/artifacts/integration-test-skeleton.md), would mirror #19753's `process_group_cleanup.rs`).
 
-Per [`docs/contributing.md`](https://github.com/openai/codex/blob/main/docs/contributing.md), this is offered as analysis. Happy to follow the invitation process if useful.
+Per [`docs/contributing.md`](https://github.com/openai/codex/blob/main/docs/contributing.md), this is offered as analysis. Will follow the invitation process if useful.
 
 — Alejandro Pena ([@adpena](https://github.com/adpena))
