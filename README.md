@@ -9,6 +9,34 @@ without review. This repo is analysis material in the spirit of that policy — 
 fodder, not an unsolicited PR. If the team would find a PR useful, I'll open one
 when invited.
 
+## Verification against current upstream
+
+The investigation and the patch were authored against
+[`3895ddd6b`](https://github.com/openai/codex/commit/3895ddd6b1caf80cd77d6fd44e3ce55bd290ef18).
+Re-reading the same code paths against current `main`
+([`80fb0704ee`](https://github.com/openai/codex/commit/80fb0704ee8b23ab7cbc3f2c4dcdbf3c1a5fbd4b),
+685 commits later), the three structural defects are unchanged:
+
+- `AgentRegistry::release_spawned_thread`
+  ([`registry.rs:99`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/registry.rs#L99))
+  still decrements only on metadata removal; its two callers in
+  `agent/control.rs` ([691](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L691),
+  [714](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L714))
+  trigger only on `InternalAgentDied` and explicit shutdown — finalized
+  `Completed` / `Errored` agents keep their slot.
+- `session::handlers::shutdown`
+  ([`session/handlers.rs:879`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/session/handlers.rs#L879))
+  does not call `live_thread_spawn_descendants` (which already exists at
+  [`control.rs:1164`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L1164)).
+- Per-session `mcp_connection_manager` ownership is unchanged.
+
+The patch in this repo was authored against `3895ddd6b` and predates the
+`codex.rs` → `session/{handlers.rs, …}` split (commits
+[`Move codex module under session` (#18249)](https://github.com/openai/codex/pull/18249)
+and [`Split codex session modules` (#18244)](https://github.com/openai/codex/pull/18244)).
+The diff anchors need re-targeting onto current `main`; the substantive change
+is unchanged.
+
 cc, based on recent authorship of the touched files:
 
 - [@jif-oai](https://github.com/jif-oai) — primary author on `core/src/agent/control.rs`
