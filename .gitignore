@@ -1,0 +1,14 @@
+# Local working clones of openai/codex used for investigation.
+# Kept on disk so the patch can be regenerated, but not committed.
+codex/
+codex-pr2/
+
+# Raw investigation scratch (large build/test logs, fleet helpers, redundant PR drafts).
+# Curated outputs live under artifacts/ and patches/ instead.
+codex-investigation-artifacts/
+
+# OS / editor noise
+.DS_Store
+*.swp
+.idea/
+.vscode/

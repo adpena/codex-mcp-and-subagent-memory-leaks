@@ -1,0 +1,20 @@
+{
+  "out_dir": "/Users/adpena/Projects/chodex/codex/.tmp/codex-soak-n6kjiupu",
+  "workers": [
+    {
+      "name": "worker-00",
+      "scenario": "spawn_recursive",
+      "pid": 85095,
+      "exit_code": 1,
+      "log_path": "/Users/adpena/Projects/chodex/codex/.tmp/codex-soak-n6kjiupu/worker-00/codex.log",
+      "lifecycle_counts": {
+        "agent_slot_reserved": 6,
+        "agent_slot_released": 5,
+        "mcp_spawned": 7,
+        "mcp_dropped": 7
+      }
+    }
+  ],
+  "survivors": [],
+  "samples_path": "/Users/adpena/Projects/chodex/codex/.tmp/codex-soak-n6kjiupu/process_samples.jsonl"
+}

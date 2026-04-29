@@ -1,0 +1,521 @@
+codex-rs/core/src/agent/control.rs                 |  85 ++++++++++--
+ codex-rs/core/src/agent/control_tests.rs           | 154 ++++++++++++++++++++-
+ codex-rs/core/src/agent/registry.rs                |  59 +++++++-
+ codex-rs/core/src/agent/registry_tests.rs          |  59 +++++++-
+ codex-rs/core/src/codex.rs                         |  58 ++++++++
+ .../tools/handlers/multi_agents/resume_agent.rs    |   7 +-
+ .../core/src/tools/handlers/multi_agents/wait.rs   |   3 +-
+ codex-rs/core/tests/common/lib.rs                  |   4 +
+ codex-rs/core/tests/suite/mod.rs                   |   4 +
+ 9 files changed, 410 insertions(+), 23 deletions(-)
+
+--- Changes ---
+
+codex-rs/core/src/agent/control.rs
+  @@ -599,6 +599,13 @@ impl AgentControl {
+  +    pub(crate) async fn has_live_thread(&self, agent_id: ThreadId) -> bool {
+  +        let Ok(state) = self.upgrade() else {
+  +            return false;
+  +        };
+  +        state.get_thread(agent_id).await.is_ok()
+  +    }
+  +
+       /// Append a prebuilt message to an existing agent thread outside the normal user-input path.
+       #[cfg(test)]
+       pub(crate) async fn append_message(
+  @@ -657,6 +664,22 @@ impl AgentControl {
+  +    async fn retire_finalized_agent(
+  +        &self,
+  +        agent_id: ThreadId,
+  +        status: AgentStatus,
+  +    ) -> CodexResult<()> {
+  +        let state = self.upgrade()?;
+  +        let mut flush_result = Ok(());
+  +        if let Ok(thread) = state.get_thread(agent_id).await {
+  +            thread.codex.session.ensure_rollout_materialized().await;
+  +            flush_result = thread.codex.session.flush_rollout().await;
+  +            let _ = state.remove_thread(&agent_id).await;
+  +        }
+  +        self.state.retire_spawned_thread(agent_id, status);
+  +        flush_result.map_err(Into::into)
+  +    }
+  +
+       /// Submit a shutdown request for a live agent without marking it explicitly closed in
+       /// persisted spawn-edge state.
+       pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
+  @@ -669,6 +692,8 @@ impl AgentControl {
+  +        } else if self.state.agent_metadata_for_thread(agent_id).is_some() {
+  +            Ok(String::new())
+           } else {
+               state.send_op(agent_id, Op::Shutdown {}).await
+           };
+  @@ -711,10 +736,12 @@ impl AgentControl {
+  -        let Ok(thread) = state.get_thread(agent_id).await else {
+  -            return AgentStatus::NotFound;
+  -        };
+  -        thread.agent_status().await
+  +        if let Ok(thread) = state.get_thread(agent_id).await {
+  +            return thread.agent_status().await;
+  +        }
+  +        self.state
+  +            .cached_status_for_thread(agent_id)
+  +            .unwrap_or(AgentStatus::NotFound)
+       }
+   
+       pub(crate) fn register_session_root(
+  @@ -740,6 +767,30 @@ impl AgentControl {
+  +    pub(crate) async fn shutdown_live_descendants(
+  +        &self,
+  +        root_thread_id: ThreadId,
+  +    ) -> CodexResult<()> {
+  +        for _ in 0..16 {
+  +            let descendants = self.live_thread_spawn_descendants(root_thread_id).await?;
+  +            if descendants.is_empty() {
+  +                break;
+  +            }
+  +            for descendant_id in descendants {
+  +                match self.shutdown_live_agent(descendant_id).await {
+  +                    Ok(_) | Err(CodexErr::ThreadNotFound(_)) | Err(CodexErr::InternalAgentDied) => {
+  +                    }
+  +                    Err(err) => return Err(err),
+  +                }
+  +            }
+  +        }
+  +        Ok(())
+  +    }
+  +
+  +    pub(crate) fn clear_spawned_registry_for_root_shutdown(&self) {
+  +        self.state.clear_for_root_shutdown();
+  +    }
+  +
+       pub(crate) async fn get_agent_config_snapshot(
+           &self,
+           agent_id: ThreadId,
+  @@ -871,19 +922,22 @@ impl AgentControl {
+  -
+  -            let Ok(thread) = state.get_thread(thread_id).await else {
+  -                continue;
+  -            };
+               let agent_name = metadata
+                   .agent_path
+                   .as_ref()
+                   .map(ToString::to_string)
+                   .unwrap_or_else(|| thread_id.to_string());
+               let last_task_message = metadata.last_task_message.clone();
+  +            let agent_status = if let Ok(thread) = state.get_thread(thread_id).await {
+  +                thread.agent_status().await
+  +            } else if let Some(status) = metadata.last_status.clone() {
+  +                status
+  +            } else {
+  +                AgentStatus::NotFound
+  +            };
+               agents.push(ListedAgent {
+                   agent_name,
+  -                agent_status: thread.agent_status().await,
+  +                agent_status,
+                   last_task_message,
+               });
+           }
+  @@ -928,6 +982,14 @@ impl AgentControl {
+  +            if matches!(status, AgentStatus::Completed(_) | AgentStatus::Errored(_))
+  +                && let Err(err) = control
+  +                    .retire_finalized_agent(child_thread_id, status.clone())
+  +                    .await
+  +            {
+  +                warn!("failed to retire finalized agent {child_thread_id}: {err}");
+  +            }
+  +
+               let Ok(state) = control.upgrade() else {
+                   return;
+               };
+  @@ -1006,6 +1068,7 @@ impl AgentControl {
+  +            ..Default::default()
+           };
+           Ok((session_source, agent_metadata))
+       }
+  @@ -1133,7 +1196,7 @@ impl AgentControl {
+  -    async fn live_thread_spawn_descendants(
+  +    pub(crate) async fn live_thread_spawn_descendants(
+           &self,
+           root_thread_id: ThreadId,
+       ) -> CodexResult<Vec<ThreadId>> {
+  @@ -1160,7 +1223,7 @@ impl AgentControl {
+  -fn thread_spawn_parent_thread_id(session_source: &SessionSource) -> Option<ThreadId> {
+  +pub(crate) fn thread_spawn_parent_thread_id(session_source: &SessionSource) -> Option<ThreadId> {
+       match session_source {
+           SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+               parent_thread_id, ..
+  +74 -11
+
+codex-rs/core/src/agent/control_tests.rs
+  @@ -993,6 +993,143 @@ async fn spawn_agent_releases_slot_after_shutdown() {
+  +#[tokio::test]
+  +async fn spawn_agent_releases_slot_after_completion() {
+  +    let max_threads = 1usize;
+  +    let (_home, config) = test_config_with_cli_overrides(vec![(
+  +        "agents.max_threads".to_string(),
+  +        TomlValue::Integer(max_threads as i64),
+  +    )])
+  +    .await;
+  +    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+  +        CodexAuth::from_api_key("dummy"),
+  +        config.model_provider.clone(),
+  +        config.codex_home.clone(),
+  +        std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
+  +            /*exec_server_url*/ None,
+  +        )),
+  +    );
+  +    let control = manager.agent_control();
+  +    let parent = manager
+  +        .start_thread(config.clone())
+  +        .await
+  +        .expect("start parent");
+  +
+  +    let first_agent_id = control
+  +        .spawn_agent(
+  +            config.clone(),
+  +            text_input("hello"),
+  +            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+  +                parent_thread_id: parent.thread_id,
+  +                depth: 1,
+  +                agent_path: None,
+  +                agent_nickname: None,
+  +                agent_role: None,
+  +            })),
+  +        )
+  +        .await
+  +        .expect("spawn_agent should succeed");
+  +
+  +    let child_thread = manager
+  +        .get_thread(first_agent_id)
+  +        .await
+  +        .expect("child thread should exist");
+  +    let child_turn = child_thread.codex.session.new_default_turn().await;
+  +    child_thread
+  +        .codex
+  +        .session
+  +        .send_event(
+  +            child_turn.as_ref(),
+  +            EventMsg::TurnComplete(TurnCompleteEvent {
+  +                turn_id: child_turn.sub_id.clone(),
+  +                last_agent_message: Some("done".to_string()),
+  +                completed_at: None,
+  +                duration_ms: None,
+  +            }),
+  +        )
+  +        .await;
+  +
+  +    timeout(Duration::from_secs(10), async {
+  +        loop {
+  +            if matches!(
+  +                control.get_status(first_agent_id).await,
+  +                AgentStatus::Completed(_)
+  +            ) && manager.get_thread(first_agent_id).await.is_err()
+  +            {
+  +                break;
+  +            }
+  +            sleep(Duration::from_millis(20)).await;
+  +        }
+  +    })
+  +    .await
+  +    .expect("completed child should be retired");
+  +
+  +    let second_agent_id = control
+  +        .spawn_agent(
+  +            config,
+  +            text_input("hello again"),
+  +            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+  +                parent_thread_id: parent.thread_id,
+  +                depth: 1,
+  +                agent_path: None,
+  +                agent_nickname: None,
+  +                agent_role: None,
+  +            })),
+  +        )
+  +        .await
+  +        .expect("spawn_agent should succeed after completion");
+  +    let _ = control
+  +        .shutdown_live_agent(second_agent_id)
+  +        .await
+  +        .expect("shutdown agent");
+  +}
+  +
+  +#[tokio::test]
+  +async fn root_shutdown_shuts_down_live_spawned_descendants() {
+  +    let harness = AgentControlHarness::new().await;
+  +    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+  +
+  +    let child_thread_id = harness
+  +        .control
+  +        .spawn_agent(
+  +            harness.config.clone(),
+  ... (37 lines truncated)
+  @@ -1057,12 +1194,23 @@ async fn resume_agent_respects_max_threads_limit() {
+  +    let parent = manager
+  +        .start_thread(config.clone())
+  +        .await
+  +        .expect("start parent");
+  +    let child_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+  +        parent_thread_id: parent.thread_id,
+  +        depth: 1,
+  +        agent_path: None,
+  +        agent_nickname: None,
+  +        agent_role: None,
+  +    });
+   
+       let resumable_id = control
+           .spawn_agent(
+               config.clone(),
+               text_input("hello"),
+  -            /*session_source*/ None,
+  +            Some(child_source.clone()),
+           )
+           .await
+           .expect("spawn_agent should succeed");
+  @@ -1075,13 +1223,13 @@ async fn resume_agent_respects_max_threads_limit() {
+  -            /*session_source*/ None,
+  +            Some(child_source.clone()),
+           )
+           .await
+           .expect("spawn_agent should succeed for active slot");
+   
+       let err = control
+  -        .resume_agent_from_rollout(config, resumable_id, SessionSource::Exec)
+  +        .resume_agent_from_rollout(config, resumable_id, child_source)
+           .await
+           .expect_err("resume should respect max threads");
+       let CodexErr::AgentLimitReached {
+  +151 -3
+
+codex-rs/core/src/agent/registry.rs
+  @@ -2,6 +2,7 @@ use codex_protocol::AgentPath;
+  +use codex_protocol::protocol::AgentStatus;
+   use codex_protocol::protocol::SessionSource;
+   use codex_protocol::protocol::SubAgentSource;
+   use rand::prelude::IndexedRandom;
+  @@ -39,6 +40,8 @@ pub(crate) struct AgentMetadata {
+  +    pub(crate) last_status: Option<AgentStatus>,
+  +    pub(crate) slot_active: bool,
+   }
+   
+   fn format_agent_nickname(name: &str, nickname_reset_count: usize) -> String {
+  @@ -109,15 +112,36 @@ impl AgentRegistry {
+  -                .is_some_and(|metadata| {
+  -                    !metadata.agent_path.as_ref().is_some_and(AgentPath::is_root)
+  -                })
+  +                .is_some_and(|metadata| metadata.slot_active)
+           };
+           if removed_counted_agent {
+               self.total_count.fetch_sub(1, Ordering::AcqRel);
+           }
+       }
+   
+  +    pub(crate) fn retire_spawned_thread(&self, thread_id: ThreadId, status: AgentStatus) {
+  +        let released_slot = {
+  +            let mut active_agents = self
+  +                .active_agents
+  +                .lock()
+  +                .unwrap_or_else(std::sync::PoisonError::into_inner);
+  +            let Some(metadata) = active_agents
+  +                .agent_tree
+  +                .values_mut()
+  +                .find(|metadata| metadata.agent_id == Some(thread_id))
+  +            else {
+  +                return;
+  +            };
+  +            metadata.last_status = Some(status);
+  +            let released_slot = metadata.slot_active;
+  +            metadata.slot_active = false;
+  +            released_slot
+  +        };
+  +        if released_slot {
+  +            self.total_count.fetch_sub(1, Ordering::AcqRel);
+  +        }
+  +    }
+  +
+       pub(crate) fn register_root_thread(&self, thread_id: ThreadId) {
+           let mut active_agents = self
+               .active_agents
+  @@ -152,6 +176,22 @@ impl AgentRegistry {
+  +    pub(crate) fn cached_status_for_thread(&self, thread_id: ThreadId) -> Option<AgentStatus> {
+  +        self.agent_metadata_for_thread(thread_id)
+  +            .and_then(|metadata| metadata.last_status)
+  +    }
+  +
+  +    pub(crate) fn clear_for_root_shutdown(&self) {
+  +        let mut active_agents = self
+  +            .active_agents
+  +            .lock()
+  +            .unwrap_or_else(std::sync::PoisonError::into_inner);
+  +        active_agents
+  +            .agent_tree
+  +            .retain(|_, metadata| metadata.agent_path.as_ref().is_some_and(AgentPath::is_root));
+  +        self.total_count.store(0, Ordering::Release);
+  +    }
+  +
+       pub(crate) fn live_agents(&self) -> Vec<AgentMetadata> {
+           self.active_agents
+               .lock()
+  @@ -188,6 +228,8 @@ impl AgentRegistry {
+  +        let mut agent_metadata = agent_metadata;
+  +        agent_metadata.slot_active = true;
+           let key = agent_metadata
+               .agent_path
+               .as_ref()
+  @@ -258,6 +300,14 @@ impl AgentRegistry {
+  +    fn release_reserved_agent_nickname(&self, agent_nickname: &str) {
+  +        let mut active_agents = self
+  +            .active_agents
+  +            .lock()
+  +            .unwrap_or_else(std::sync::PoisonError::into_inner);
+  +        active_agents.used_agent_nicknames.remove(agent_nickname);
+  +    }
+  +
+       fn release_reserved_agent_path(&self, agent_path: &AgentPath) {
+           let mut active_agents = self
+               .active_agents
+  @@ -331,6 +381,9 @@ impl SpawnReservation {
+  +            if let Some(agent_nickname) = self.reserved_agent_nickname.take() {
+  +                self.state.release_reserved_agent_nickname(&agent_nickname);
+  +            }
+               if let Some(agent_path) = self.reserved_agent_path.take() {
+                   self.state.release_reserved_agent_path(&agent_path);
+               }
+  +56 -3
+
+codex-rs/core/src/agent/registry_tests.rs
+  @@ -1,5 +1,6 @@
+  +use codex_protocol::protocol::AgentStatus;
+   use pretty_assertions::assert_eq;
+   use std::collections::HashSet;
+   
+  @@ -160,7 +161,7 @@ fn release_is_idempotent_for_registered_threads() {
+  -fn failed_spawn_keeps_nickname_marked_used() {
+  +fn failed_spawn_releases_reserved_nickname() {
+       let registry = Arc::new(AgentRegistry::default());
+       let mut reservation = registry
+           .reserve_spawn_slot(/*max_threads*/ None)
+  @@ -175,9 +176,9 @@ fn failed_spawn_keeps_nickname_marked_used() {
+  -        .reserve_agent_nickname_with_preference(&["alpha", "beta"], /*preferred*/ None)
+  -        .expect("unused name should still be preferred");
+  -    assert_eq!(agent_nickname, "beta");
+  +        .reserve_agent_nickname_with_preference(&["alpha"], /*preferred*/ None)
+  +        .expect("released name should be reusable");
+  +    assert_eq!(agent_nickname, "alpha");
+   }
+   
+   #[test]
+  @@ -348,3 +349,53 @@ fn committed_agent_path_is_indexed_until_release() {
+  +
+  +#[test]
+  +fn retire_releases_slot_and_preserves_cached_status() {
+  +    let registry = Arc::new(AgentRegistry::default());
+  +    let thread_id = ThreadId::new();
+  +    let reservation = registry.reserve_spawn_slot(Some(1)).expect("reserve slot");
+  +    reservation.commit(agent_metadata(thread_id));
+  +
+  +    registry.retire_spawned_thread(thread_id, AgentStatus::Completed(Some("done".to_string())));
+  +
+  +    let reservation = registry
+  +        .reserve_spawn_slot(Some(1))
+  +        .expect("slot should be released after retire");
+  +    drop(reservation);
+  +
+  +    assert_eq!(
+  +        registry.cached_status_for_thread(thread_id),
+  +        Some(AgentStatus::Completed(Some("done".to_string())))
+  +    );
+  +}
+  +
+  +#[test]
+  +fn clear_for_root_shutdown_releases_all_spawned_slots() {
+  +    let registry = Arc::new(AgentRegistry::default());
+  +    let first_id = ThreadId::new();
+  +    let second_id = ThreadId::new();
+  +
+  +    let first = registry.reserve_spawn_slot(Some(2)).expect("reserve first");
+  +    first.commit(agent_metadata(first_id));
+  +    let second = registry
+  +        .reserve_spawn_slot(Some(2))
+  +        .expect("reserve second");
+  +    second.commit(agent_metadata(second_id));
+  +
+  +    let err = match registry.reserve_spawn_slot(Some(2)) {
+  +        Ok(_) => panic!("limit should be enforced"),
+  +        Err(err) => err,
+  +    };
+  +    assert!(matches!(
+  +        err,
+  +        CodexErr::AgentLimitReached { max_threads: 2 }
+  +    ));
+  +
+  +    registry.clear_for_root_shutdown();
+  +
+  +    let reservation = registry
+  +        .reserve_spawn_slot(Some(2))
+  +        .expect("slots should be released after root shutdown clear");
+  +    drop(reservation);
+  +}
+  +55 -4
+
+codex-rs/core/src/codex.rs
+  @@ -5657,7 +5657,65 @@ mod handlers {
+  +        let session_source = {
+  +            let state = sess.state.lock().await;
+  +            state.session_configuration.session_source.clone()
+  +        };
+  +        let should_shutdown_descendants =
+  +            crate::agent::control::thread_spawn_parent_thread_id(&session_source).is_none();
+  +        if should_shutdown_descendants
+  +            && let Err(err) = sess
+  +                .services
+  +                .agent_control
+  +                .shutdown_live_descendants(sess.conversation_id)
+  +                .await
+  +        {
+  +            warn!(
+  +                "failed pre-shutdown descendant cleanup for {}: {err}",
+  +                sess.conversation_id
+  +            );
+  +        }
+           let _ = sess.conversation.shutdown().await;
+  +        if should_shutdown_descendants
+  +            && let Err(err) = sess
+  +                .services
+  +                .agent_control
+  +                .shutdown_live_descendants(sess.conversation_id)
+  +                .await
+  +        {
+  +            warn!(
+  +                "failed post-shutdown descendant cleanup for {}: {err}",
+  +                sess.conversation_id
+  +            );
+  +        }
+  +        if should_shutdown_descendants {
+  +            match sess
+  +                .services
+  +                .agent_control
+  +                .live_thread_spawn_descendants(sess.conversation_id)
+  +                .await
+  +            {
+  +                Ok(descendants) => {
+  +                    if descendants.is_empty() {
+  +                        sess.services
+  +                            .agent_control
+  +                            .clear_spawned_registry_for_root_shutdown();
+  +                    } else {
+  +                        warn!(
+  +                            "skipping spawned-agent registry clear for {} with {} descendants still live",
+  +                            sess.conversation_id,
+  +                            descendants.len()
+  +                        );
+  +                    }
+  +                }
+  +                Err(err) => {
+  +                    warn!(
+  +                        "skipping spawned-agent registry clear for {} after descendant lookup failure: {err}",
+  +                        sess.conversation_id
+
+... (more changes truncated)
+  +54 -0
+[full diff: rtk git diff --no-compact]
