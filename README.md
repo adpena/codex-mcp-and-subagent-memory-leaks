@@ -151,25 +151,40 @@ diagnostic patch or wiring a new telemetry surface.
 | Investigation, `3895ddd6b` + patch + diagnostic build | Patched, run 1 | 6 | **4** | 7 | 6 |
 | Investigation, `3895ddd6b` + patch + diagnostic build | Patched, run 2 | 6 | **5** | 7 | 7 |
 
-Refresh attempt against `codex-cli 0.125.0` (6 workers × 90 s, summary at
-[`artifacts/soak-summaries/current-main-20260428-212049/`](artifacts/soak-summaries/current-main-20260428-212049/)):
-the harness's SSE fixture drove `function_call: spawn_agent` events that
-the tool router rejected as `unsupported call: spawn_agent` (50,292
-rejections in `worker-00` alone) because `spawn_agent` registration is now
-gated behind explicit `[agents]` or `features.multi_agent_v2` config that
-the harness wasn't setting. The 44 stdio MCP children across 6 workers
-visible during the run come from each session's eager
-`McpConnectionManager` startup at session creation — they confirm
-*per-session MCP startup* exists, **not** that recursive subagent fanout
-or slot retention are observable end-to-end.
+Refresh against `codex-cli 0.125.0` and against the patched fix branch
+(2026-04-29, 4 workers × 60 s, `spawn_recursive` scenario, V1 multi_agents
+config with `[agents] max_threads = 4`):
 
-The harness has since been updated to set the right config (`--agent-path
-v1|v2`, `--max-threads N`); see
-[`artifacts/soak_codex_concurrency.py`](artifacts/soak_codex_concurrency.py).
-Re-running against the patched binary on the
-[`fix/subagent-retention-after-19753`](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/tree/main/codex)
-branch is in progress; results land in
-[`artifacts/soak-summaries/`](artifacts/soak-summaries/) as they complete.
+| Metric (4 workers × 60 s, `spawn_recursive`)            | Unpatched (`codex-cli 0.125.0`) | Patched (`fix/subagent-retention-after-19753`) | Change   |
+| ------------------------------------------------------- | ------------------------------- | ---------------------------------------------- | -------- |
+| `unsupported call: spawn_agent` errors (legacy gating)  | 0                               | 0                                              | ✓ both runs use the new V1 config |
+| Total `agent thread limit reached` rejections (4 × 60s) | **184,819**                     | **65,571**                                     | **−64%** |
+| Per-worker rejection rate                               | ≈ 46,200                        | ≈ 16,400                                       | −65%     |
+| Process-sample mean (steady state)                      | 25.0                            | 24.1                                           | ≈ same   |
+| Surviving codex / MCP processes after teardown          | 0                               | 0                                              | ≈ same   |
+
+Reading: under the same `spawn_recursive` SSE fixture and the same
+`max_threads = 4` cap, the patched binary admits about **3 × more
+successful `spawn_agent` invocations per worker per minute** before the
+slot accounting blocks new spawns. That's the slot-retention defect (and
+its fix) showing up empirically: when finalized subagents retire and
+release their slot, new spawns succeed instead of erroring with
+`agent thread limit reached`. The total per-worker rate of model-emitted
+spawn attempts is the same in both runs (the SSE fixture replays the
+same events at roughly the same speed) — only the *acceptance* rate
+changes.
+
+What the soak still doesn't prove on its own:
+
+- That the MCP child for a *retired* subagent is gone afterwards. Per-worker
+  steady-state process counts are dominated by the root session's
+  `McpConnectionManager` startup, which both runs share. An integration
+  test using `MCP_TEST_PID_FILE` against `test_stdio_server` (along the
+  lines of [#19753](https://github.com/openai/codex/pull/19753)'s
+  `process_group_cleanup.rs`) is the cleaner verification here. Listed as
+  pending follow-up below.
+- That race conditions between explicit shutdown / retirement / descendant
+  drain compose correctly. Listed as pending follow-up.
 
 Raw summaries:
 [`artifacts/soak-summaries/`](artifacts/soak-summaries/).

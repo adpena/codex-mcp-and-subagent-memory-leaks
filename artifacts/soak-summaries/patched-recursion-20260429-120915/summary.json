@@ -1,0 +1,80 @@
+{
+  "out_dir": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/patched-recursion-20260429-120915",
+  "workers": [
+    {
+      "name": "worker-00",
+      "scenario": "spawn_recursive",
+      "pid": 63259,
+      "exit_code": 1,
+      "log_path": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/patched-recursion-20260429-120915/worker-00/codex.log",
+      "lifecycle_counts": {
+        "agent_slot_reserved": 0,
+        "agent_slot_released": 0,
+        "mcp_spawned": 0,
+        "mcp_dropped": 0
+      }
+    },
+    {
+      "name": "worker-01",
+      "scenario": "spawn_recursive",
+      "pid": 63260,
+      "exit_code": 1,
+      "log_path": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/patched-recursion-20260429-120915/worker-01/codex.log",
+      "lifecycle_counts": {
+        "agent_slot_reserved": 0,
+        "agent_slot_released": 0,
+        "mcp_spawned": 0,
+        "mcp_dropped": 0
+      }
+    },
+    {
+      "name": "worker-02",
+      "scenario": "spawn_recursive",
+      "pid": 63261,
+      "exit_code": 1,
+      "log_path": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/patched-recursion-20260429-120915/worker-02/codex.log",
+      "lifecycle_counts": {
+        "agent_slot_reserved": 0,
+        "agent_slot_released": 0,
+        "mcp_spawned": 0,
+        "mcp_dropped": 0
+      }
+    },
+    {
+      "name": "worker-03",
+      "scenario": "spawn_recursive",
+      "pid": 63265,
+      "exit_code": 1,
+      "log_path": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/patched-recursion-20260429-120915/worker-03/codex.log",
+      "lifecycle_counts": {
+        "agent_slot_reserved": 0,
+        "agent_slot_released": 0,
+        "mcp_spawned": 0,
+        "mcp_dropped": 0
+      }
+    }
+  ],
+  "survivors": [
+    {
+      "pid": 63253,
+      "ppid": 70676,
+      "pgid": 63253,
+      "rss_kb": 2704,
+      "vsz_kb": 442206080,
+      "stat": "Ss",
+      "etime": "01:00",
+      "command": "/bin/zsh -c source /Users/adpena/.claude/shell-snapshots/snapshot-zsh-1777425185601-f5hte6.sh 2>/dev/null || true && export CODEX_COMPANION_SESSION_ID='68e40ddd-3373-4109-9054-80cac6544ffb'\\012export CLAUDE_PLUGIN_DATA='/Users/adpena/.claude/plugins/data/codex-openai-codex'\\012: && setopt NO_EXTENDED_GLOB 2>/dev/null || true && eval 'cd /Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks && OUT=/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/patched-recursion-$(date +%Y%m%d-%H%M%S) && mkdir -p \"$OUT\" && echo \"OUT=$OUT\" && python3 artifacts/soak_codex_concurrency.py --workers 4 --duration-sec 60 --spawn-interval-ms 400 --sample-interval-sec 2 --debug-lifecycle --scenarios spawn_recursive --agent-path v1 --max-threads 4 --codex-bin /Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/target/debug/codex --stdio-server-bin /Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/target/release/test_stdio_server --out-dir \"$OUT\" 2>&1 | tail -10' < /dev/null && pwd -P >| /tmp/claude-655a-cwd"
+    },
+    {
+      "pid": 63257,
+      "ppid": 63253,
+      "pgid": 63253,
+      "rss_kb": 25824,
+      "vsz_kb": 442194224,
+      "stat": "S",
+      "etime": "01:00",
+      "command": "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python artifacts/soak_codex_concurrency.py --workers 4 --duration-sec 60 --spawn-interval-ms 400 --sample-interval-sec 2 --debug-lifecycle --scenarios spawn_recursive --agent-path v1 --max-threads 4 --codex-bin /Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/target/debug/codex --stdio-server-bin /Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex/codex-rs/target/release/test_stdio_server --out-dir /Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/patched-recursion-20260429-120915"
+    }
+  ],
+  "samples_path": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/patched-recursion-20260429-120915/process_samples.jsonl"
+}

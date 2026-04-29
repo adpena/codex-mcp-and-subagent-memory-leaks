@@ -1,0 +1,100 @@
+2026-04-29T17:10:14.822704Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.830455Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.835096Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.845404Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.851886Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.854123Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.854700Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+collab: SpawnAgent
+2026-04-29T17:10:14.866437Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.870859Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.877374Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+collab: SpawnAgent
+2026-04-29T17:10:14.884190Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.889558Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.893119Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.896363Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.901548Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+collab: SpawnAgent
+2026-04-29T17:10:14.911421Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.913243Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.918896Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.924389Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+collab: SpawnAgent
+2026-04-29T17:10:14.935630Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.935677Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.946295Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.950608Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.957196Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.959443Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+collab: SpawnAgent
+2026-04-29T17:10:14.965881Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.968294Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.985599Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.986968Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:14.988773Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+collab: SpawnAgent
+2026-04-29T17:10:14.993158Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.000672Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.009530Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.011061Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+collab: SpawnAgent
+2026-04-29T17:10:15.023639Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.027889Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.031056Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.045313Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.046073Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.054074Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.057039Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+collab: SpawnAgent
+2026-04-29T17:10:15.075041Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.076755Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.079571Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.079666Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+collab: SpawnAgent
+2026-04-29T17:10:15.090514Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.098074Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.112262Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.119960Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.128496Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.129212Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.140027Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.151695Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.162491Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.166088Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.176983Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.178764Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.194405Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.195708Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.199841Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.201913Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.217891Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.222189Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.224380Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.232607Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.245249Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.248185Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.254203Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.262636Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.269574Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.271309Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.276388Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.292619Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.295048Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.300385Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.315605Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.317670Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.318854Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.324534Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.337528Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.343466Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.348060Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+turn interrupted
+2026-04-29T17:10:15.361470Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.370557Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.375152Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.378035Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached
+2026-04-29T17:10:15.401150Z ERROR codex_core::session: failed to record rollout items: thread 019dda37-74d3-7572-9984-785d8fcaf410 not found
+2026-04-29T17:10:15.401194Z ERROR codex_core::session: failed to record rollout items: thread 019dda37-74d3-7572-9984-785d8fcaf410 not found
+2026-04-29T17:10:15.403587Z ERROR codex_core::session: failed to record rollout items: thread 019dda37-74d3-7572-9984-785d8fcaf410 not found
+2026-04-29T17:10:15.403626Z ERROR codex_core::session: failed to record rollout items: thread 019dda37-74d3-7572-9984-785d8fcaf410 not found
