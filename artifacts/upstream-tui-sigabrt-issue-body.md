@@ -1,18 +1,3 @@
-# Draft: openai/codex CLI bug report — codex-tui --lib SIGABRT under cargo test
-
-Independent of the slot-retention analysis at
-https://github.com/adpena/codex-mcp-and-subagent-memory-leaks. Surfaced
-during workspace-test verification of that work and worth tracking
-separately.
-
-Matches the [`3-cli.yml`](https://github.com/openai/codex/blob/main/.github/ISSUE_TEMPLATE/3-cli.yml) template field-by-field. `[FILL IN]` markers must be replaced before submission.
-
----
-
-## Title
-
-> `cargo test -p codex-tui --lib` aborts with SIGABRT mid-run on macOS arm64 (~2000 tests deep)
-
 ## What version of Codex CLI is running?
 
 Built from source at `openai/codex@80fb0704ee` (current `main` as of 2026-04-29).
@@ -86,17 +71,3 @@ A core dump or `RUST_BACKTRACE=full` capture from a reproducing run would narrow
 Build: `cargo +1.93.0-aarch64-apple-darwin test`, default debug profile.
 
 — Alejandro Pena ([@adpena](https://github.com/adpena))
-
----
-
-## Submission command
-
-```bash
-gh issue create \
-  --repo openai/codex \
-  --title "codex-tui --lib aborts with SIGABRT mid-run on macOS arm64" \
-  --label bug \
-  --body-file artifacts/upstream-tui-sigabrt-issue-body.md
-```
-
-(Generate `upstream-tui-sigabrt-issue-body.md` as a clean version with `[FILL IN]` placeholders filled and instruction frontmatter stripped.)
