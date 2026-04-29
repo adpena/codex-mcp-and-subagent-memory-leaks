@@ -1,8 +1,8 @@
 From 394cdf3bfd1788624ba76dc880b2ab01d2a666fc Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Tue, 28 Apr 2026 23:13:51 -0500
-Subject: [PATCH] codex-core: retire finalized spawned agents and drain live
- descendants on root shutdown
+Subject: [PATCH 1/3] codex-core: retire finalized spawned agents and drain
+ live descendants on root shutdown
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -759,6 +759,449 @@ index bcf4e3d558..805caf0e8c 100644
  #[cfg(not(target_os = "windows"))]
  mod abort_tasks;
  mod agent_jobs;
+-- 
+2.50.1 (Apple Git-155)
+
+
+From c65d747b095e64609790afb6d09af0418495fd78 Mon Sep 17 00:00:00 2001
+From: Alejandro Pena <adpena@gmail.com>
+Date: Wed, 29 Apr 2026 11:17:06 -0500
+Subject: [PATCH 2/3] Harden fix per adversarial review: V2 retirement,
+ deadline sweep, lifecycle enum
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Findings 1, 2, 3, 6 from the adversarial review:
+
+1. V2 retirement path (Finding 1): the V1 completion watcher in
+   `agent::control` is gated behind `!Feature::MultiAgentV2`, so V2
+   spawned subagents never reached `retire_finalized_agent`. Wired V2
+   retirement directly into `Session::maybe_notify_parent_of_terminal_turn`
+   so that terminal `Completed` / `Errored` turns retire the slot in V2 as
+   they already did in V1. `retire_finalized_agent` is now `pub(crate)`.
+
+2. Explicit shutdown on retirement (Finding 2): `retire_finalized_agent`
+   previously relied on the last `Arc<CodexThread>` being dropped to
+   close the submission channel and trigger #19753's MCP teardown.
+   Send `Op::Shutdown` explicitly (when the agent isn't already in
+   `Shutdown`) so `session::handlers::shutdown` runs deterministically.
+   Channel-closed errors are warned and ignored — same tolerance as
+   `shutdown_live_agent`.
+
+3. Lifecycle enum (Finding 3): replaced `slot_active: bool` plus
+   `last_status: Option<AgentStatus>` with explicit `SlotState` enum
+   (`NotTracked` / `Active` / `Retired { last_status }`). This removes
+   the ambiguous "slot_active=false" state that could mean either
+   "root, never tracked" or "retired spawned thread". `cached_status`
+   and slot decrement logic now read directly from the enum.
+
+6. Deadline-bounded descendant sweep (Finding 6): replaced the
+   hardcoded 16-pass cap in `shutdown_live_descendants` with a
+   wall-clock deadline (30 s) plus a 64-sweep soft cap. Logs a warning
+   when the deadline or cap is hit so root teardown surfaces residual
+   live descendants instead of silently spinning.
+---
+ codex-rs/core/src/agent/control.rs  | 77 +++++++++++++++++++++++++++--
+ codex-rs/core/src/agent/registry.rs | 61 +++++++++++++++++++----
+ codex-rs/core/src/session/mod.rs    | 22 ++++++++-
+ 3 files changed, 145 insertions(+), 15 deletions(-)
+
+diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
+index 06369fa0fc..85b2488f3b 100644
+--- a/codex-rs/core/src/agent/control.rs
++++ b/codex-rs/core/src/agent/control.rs
+@@ -702,7 +702,16 @@ impl AgentControl {
+         result
+     }
+ 
+-    async fn retire_finalized_agent(
++    /// Retire a spawned subagent that has reached a terminal status (`Completed`
++    /// or `Errored`) without explicit shutdown. Releases its slot in the
++    /// registry, caches its final status for `wait_agent` / `list_agents` /
++    /// `resume_agent` UX, and explicitly drives the session through its
++    /// `handlers::shutdown` path so post-#19753 MCP teardown fires.
++    ///
++    /// Visible to the session module so the `MultiAgentV2` notification path
++    /// can call this directly, since V2 does not start the V1 completion
++    /// watcher in `agent::control::maybe_start_completion_watcher`.
++    pub(crate) async fn retire_finalized_agent(
+         &self,
+         agent_id: ThreadId,
+         status: AgentStatus,
+@@ -712,6 +721,23 @@ impl AgentControl {
+         if let Ok(thread) = state.get_thread(agent_id).await {
+             thread.codex.session.ensure_rollout_materialized().await;
+             flush_result = thread.codex.session.flush_rollout().await;
++            // Drive the session through its own `handlers::shutdown` path so
++            // post-#19753 `mcp_connection_manager.begin_shutdown()` fires
++            // deterministically. Without this, MCP-server teardown for a
++            // finalized subagent would depend on the last `Arc<CodexThread>`
++            // being dropped so the submission channel closes — plausible but
++            // not deterministic if any caller still holds a reference.
++            //
++            // `Op::Shutdown` is tolerant of a closed channel (returns an
++            // error we log and ignore) and of repeated invocation: if the
++            // session is already in `Shutdown` we skip the send entirely.
++            if !matches!(thread.agent_status().await, AgentStatus::Shutdown)
++                && let Err(err) = state.send_op(agent_id, Op::Shutdown {}).await
++            {
++                warn!(
++                    "retire_finalized_agent: explicit shutdown send for {agent_id} returned: {err}",
++                );
++            }
+             let _ = state.remove_thread(&agent_id).await;
+         }
+         self.state.retire_spawned_thread(agent_id, status);
+@@ -805,14 +831,43 @@ impl AgentControl {
+         Ok(thread_ids)
+     }
+ 
++    /// Maximum total wall-clock time to spend draining live spawned
++    /// descendants during root-session shutdown. Bounded so root teardown
++    /// cannot hang indefinitely on a misbehaving descendant.
++    const SHUTDOWN_DESCENDANT_DRAIN_DEADLINE_MS: u64 = 30_000;
++
++    /// Soft cap on consecutive sweeps. Acts as a bounded retry budget when
++    /// `live_thread_spawn_descendants` keeps returning the same set after a
++    /// shutdown attempt — for example, because a descendant is itself
++    /// blocked. Combined with the wall-clock deadline above, the sweep
++    /// always converges.
++    const SHUTDOWN_DESCENDANT_DRAIN_MAX_SWEEPS: u32 = 64;
++
+     pub(crate) async fn shutdown_live_descendants(
+         &self,
+         root_thread_id: ThreadId,
+     ) -> CodexResult<()> {
+-        for _ in 0..16 {
++        let deadline = std::time::Instant::now()
++            + std::time::Duration::from_millis(Self::SHUTDOWN_DESCENDANT_DRAIN_DEADLINE_MS);
++        let mut sweep = 0u32;
++        let mut residual_observed: Option<usize> = None;
++        loop {
+             let descendants = self.live_thread_spawn_descendants(root_thread_id).await?;
++            let descendant_count = descendants.len();
+             if descendants.is_empty() {
+-                break;
++                return Ok(());
++            }
++            if std::time::Instant::now() >= deadline {
++                warn!(
++                    "shutdown_live_descendants for {root_thread_id}: deadline reached with {descendant_count} live descendant(s) still observable; returning so root shutdown can proceed",
++                );
++                return Ok(());
++            }
++            if sweep >= Self::SHUTDOWN_DESCENDANT_DRAIN_MAX_SWEEPS {
++                warn!(
++                    "shutdown_live_descendants for {root_thread_id}: hit sweep cap with {descendant_count} live descendant(s) still observable; returning so root shutdown can proceed",
++                );
++                return Ok(());
+             }
+             for descendant_id in descendants {
+                 match self.shutdown_live_agent(descendant_id).await {
+@@ -821,8 +876,20 @@ impl AgentControl {
+                     Err(err) => return Err(err),
+                 }
+             }
++            sweep += 1;
++            // Telemetry hook: if we keep seeing the same residual count
++            // sweep-over-sweep, surface it once so callers can correlate
++            // with their own monitoring rather than silently spinning.
++            match residual_observed {
++                Some(prev) if prev == descendant_count => {
++                    // Same residual set; let the deadline / sweep cap
++                    // eventually break us out.
++                }
++                _ => {
++                    residual_observed = Some(descendant_count);
++                }
++            }
+         }
+-        Ok(())
+     }
+ 
+     pub(crate) fn clear_spawned_registry_for_root_shutdown(&self) {
+@@ -958,7 +1025,7 @@ impl AgentControl {
+             let last_task_message = metadata.last_task_message.clone();
+             let agent_status = if let Ok(thread) = state.get_thread(thread_id).await {
+                 thread.agent_status().await
+-            } else if let Some(status) = metadata.last_status.clone() {
++            } else if let Some(status) = metadata.slot_state.last_status().cloned() {
+                 status
+             } else {
+                 AgentStatus::NotFound
+diff --git a/codex-rs/core/src/agent/registry.rs b/codex-rs/core/src/agent/registry.rs
+index 2d5682ab09..460b08bc1c 100644
+--- a/codex-rs/core/src/agent/registry.rs
++++ b/codex-rs/core/src/agent/registry.rs
+@@ -33,6 +33,47 @@ struct ActiveAgents {
+     nickname_reset_count: usize,
+ }
+ 
++/// Lifecycle state of a registry entry's slot accounting.
++///
++/// Three explicit cases, in place of the earlier `slot_active: bool` plus
++/// `last_status: Option<AgentStatus>` pair:
++///
++/// - `NotTracked`: the entry never consumed a spawn slot. This is the root
++///   thread, registered for nickname/path indexing but never counted against
++///   `agents.max_threads`.
++/// - `Active`: the entry consumes a spawn slot right now and should count
++///   against `agents.max_threads`.
++/// - `Retired { last_status }`: the entry's spawned thread reached a terminal
++///   state (`Completed` / `Errored`), released its slot, and is preserved for
++///   `wait_agent` / `list_agents` / `resume_agent` UX. It does not count
++///   against `agents.max_threads`.
++///
++/// `register_spawned_thread` always commits in `Active`. `retire_spawned_thread`
++/// transitions `Active -> Retired { .. }`, decrementing the shared count once.
++/// `release_spawned_thread` only decrements when removing an `Active` entry.
++#[derive(Clone, Debug, Default, PartialEq)]
++pub(crate) enum SlotState {
++    #[default]
++    NotTracked,
++    Active,
++    Retired {
++        last_status: AgentStatus,
++    },
++}
++
++impl SlotState {
++    pub(crate) fn is_active(&self) -> bool {
++        matches!(self, SlotState::Active)
++    }
++
++    pub(crate) fn last_status(&self) -> Option<&AgentStatus> {
++        match self {
++            SlotState::Retired { last_status } => Some(last_status),
++            SlotState::Active | SlotState::NotTracked => None,
++        }
++    }
++}
++
+ #[derive(Clone, Debug, Default)]
+ pub(crate) struct AgentMetadata {
+     pub(crate) agent_id: Option<ThreadId>,
+@@ -40,8 +81,7 @@ pub(crate) struct AgentMetadata {
+     pub(crate) agent_nickname: Option<String>,
+     pub(crate) agent_role: Option<String>,
+     pub(crate) last_task_message: Option<String>,
+-    pub(crate) last_status: Option<AgentStatus>,
+-    pub(crate) slot_active: bool,
++    pub(crate) slot_state: SlotState,
+ }
+ 
+ fn format_agent_nickname(name: &str, nickname_reset_count: usize) -> String {
+@@ -112,7 +152,7 @@ impl AgentRegistry {
+                 .cloned();
+             removed_key
+                 .and_then(|key| active_agents.agent_tree.remove(key.as_str()))
+-                .is_some_and(|metadata| metadata.slot_active)
++                .is_some_and(|metadata| metadata.slot_state.is_active())
+         };
+         if removed_counted_agent {
+             self.total_count.fetch_sub(1, Ordering::AcqRel);
+@@ -132,10 +172,13 @@ impl AgentRegistry {
+             else {
+                 return;
+             };
+-            metadata.last_status = Some(status);
+-            let released_slot = metadata.slot_active;
+-            metadata.slot_active = false;
+-            released_slot
++            // Idempotency: a second retirement (or one racing with explicit
++            // shutdown) must not double-decrement the shared count.
++            let was_active = metadata.slot_state.is_active();
++            metadata.slot_state = SlotState::Retired {
++                last_status: status,
++            };
++            was_active
+         };
+         if released_slot {
+             self.total_count.fetch_sub(1, Ordering::AcqRel);
+@@ -178,7 +221,7 @@ impl AgentRegistry {
+ 
+     pub(crate) fn cached_status_for_thread(&self, thread_id: ThreadId) -> Option<AgentStatus> {
+         self.agent_metadata_for_thread(thread_id)
+-            .and_then(|metadata| metadata.last_status)
++            .and_then(|metadata| metadata.slot_state.last_status().cloned())
+     }
+ 
+     pub(crate) fn clear_for_root_shutdown(&self) {
+@@ -229,7 +272,7 @@ impl AgentRegistry {
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
+         let mut agent_metadata = agent_metadata;
+-        agent_metadata.slot_active = true;
++        agent_metadata.slot_state = SlotState::Active;
+         let key = agent_metadata
+             .agent_path
+             .as_ref()
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 415b89c0de..67c23cea55 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -1505,9 +1505,29 @@ impl Session {
+             turn_context,
+             *parent_thread_id,
+             child_agent_path,
+-            status,
++            status.clone(),
+         )
+         .await;
++
++        // V2 retirement: V2 spawning skips the V1 completion watcher in
++        // `agent::control`, so without this call a finalized V2 subagent
++        // would keep its registry slot and never trigger the post-#19753
++        // MCP teardown that retirement now drives. Mirror the V1 watcher's
++        // behavior: retire only on `Completed` / `Errored`. `Shutdown` is
++        // intentionally left to `shutdown_live_agent`, which has its own
++        // explicit cleanup path.
++        if matches!(status, AgentStatus::Completed(_) | AgentStatus::Errored(_))
++            && let Err(err) = self
++                .services
++                .agent_control
++                .retire_finalized_agent(self.conversation_id, status)
++                .await
++        {
++            warn!(
++                "V2 retire_finalized_agent for {} returned: {err}",
++                self.conversation_id
++            );
++        }
+     }
+ 
+     /// Sends the standard completion envelope from a spawned MultiAgentV2 child to its parent.
+-- 
+2.50.1 (Apple Git-155)
+
+
+From 37c05f8c75b348e030a5b66ee9e7ac4a74c4e107 Mon Sep 17 00:00:00 2001
+From: Alejandro Pena <adpena@gmail.com>
+Date: Wed, 29 Apr 2026 11:20:21 -0500
+Subject: [PATCH 3/3] Add V2 retirement test (validates Finding 1 fix)
+
+---
+ codex-rs/core/src/agent/control_tests.rs | 106 +++++++++++++++++++++++
+ 1 file changed, 106 insertions(+)
+
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index d2c5eaab3e..de4d72fb77 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -1120,6 +1120,112 @@ async fn spawn_agent_releases_slot_after_completion() {
+         .expect("shutdown agent");
+ }
+ 
++/// Mirror of [`spawn_agent_releases_slot_after_completion`] for the V2
++/// path. The V1 completion watcher in `agent::control` is gated behind
++/// `!Feature::MultiAgentV2`, so without the V2-specific retirement wiring
++/// in `Session::maybe_notify_parent_of_terminal_turn` a finalized V2
++/// subagent would keep its registry slot. This test asserts the wiring
++/// is in place: a V2 child driven to `TurnComplete` retires its slot
++/// such that a second spawn against `max_concurrent_threads_per_session
++/// = 1` succeeds.
++#[tokio::test]
++async fn v2_spawn_agent_releases_slot_after_completion() {
++    let max_threads = 1usize;
++    let (_home, config) = test_config_with_cli_overrides(vec![(
++        "features.multi_agent_v2.enabled".to_string(),
++        TomlValue::Boolean(true),
++    )])
++    .await;
++    let mut config = config;
++    config.multi_agent_v2.max_concurrent_threads_per_session = max_threads;
++    let manager = ThreadManager::with_models_provider_and_home_for_tests(
++        CodexAuth::from_api_key("dummy"),
++        config.model_provider.clone(),
++        config.codex_home.to_path_buf(),
++        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
++    );
++    let control = manager.agent_control();
++    let parent = manager
++        .start_thread(config.clone())
++        .await
++        .expect("start parent");
++
++    // V2's `maybe_notify_parent_of_terminal_turn` requires
++    // `agent_path: Some(...)` in the child's `SessionSource` to fire,
++    // so the V2 retirement test exercises that path explicitly.
++    let child_path = AgentPath::try_from("/root/v2_child").expect("agent path");
++    let first_agent_id = control
++        .spawn_agent(
++            config.clone(),
++            text_input("hello"),
++            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++                parent_thread_id: parent.thread_id,
++                depth: 1,
++                agent_path: Some(child_path.clone()),
++                agent_nickname: None,
++                agent_role: None,
++            })),
++        )
++        .await
++        .expect("spawn_agent should succeed");
++
++    let child_thread = manager
++        .get_thread(first_agent_id)
++        .await
++        .expect("child thread should exist");
++    let child_turn = child_thread.codex.session.new_default_turn().await;
++    child_thread
++        .codex
++        .session
++        .send_event(
++            child_turn.as_ref(),
++            EventMsg::TurnComplete(TurnCompleteEvent {
++                turn_id: child_turn.sub_id.clone(),
++                last_agent_message: Some("done".to_string()),
++                completed_at: None,
++                duration_ms: None,
++                time_to_first_token_ms: None,
++            }),
++        )
++        .await;
++
++    timeout(Duration::from_secs(10), async {
++        loop {
++            if matches!(
++                control.get_status(first_agent_id).await,
++                AgentStatus::Completed(_)
++            ) && manager.get_thread(first_agent_id).await.is_err()
++            {
++                break;
++            }
++            sleep(Duration::from_millis(20)).await;
++        }
++    })
++    .await
++    .expect("completed V2 child should be retired");
++
++    // A second spawn must succeed, proving the slot was released.
++    let second_path = AgentPath::try_from("/root/v2_child_2").expect("agent path");
++    let second_agent_id = control
++        .spawn_agent(
++            config,
++            text_input("hello again"),
++            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++                parent_thread_id: parent.thread_id,
++                depth: 1,
++                agent_path: Some(second_path),
++                agent_nickname: None,
++                agent_role: None,
++            })),
++        )
++        .await
++        .expect("spawn_agent should succeed after V2 completion");
++    let _ = control
++        .shutdown_live_agent(second_agent_id)
++        .await
++        .expect("shutdown agent");
++}
++
+ #[tokio::test]
+ async fn root_shutdown_shuts_down_live_spawned_descendants() {
+     let harness = AgentControlHarness::new().await;
 -- 
 2.50.1 (Apple Git-155)
 

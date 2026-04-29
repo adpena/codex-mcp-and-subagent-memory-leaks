@@ -289,8 +289,17 @@ Two patch files are provided:
 - [`patches/pr1-subagent-retention-after-19753.patch`](patches/pr1-subagent-retention-after-19753.patch)
   — **canonical**, applies on top of [`openai/codex@80fb0704ee`](https://github.com/openai/codex/commit/80fb0704ee8b23ab7cbc3f2c4dcdbf3c1a5fbd4b)
   (current `main` after [#19753](https://github.com/openai/codex/pull/19753)).
-  Generated via `git format-patch` from a single commit on a clean topic
-  branch off `origin/main`. 9 files, 409 insertions, 23 deletions.
+  Generated via `git format-patch` from three squashed commits on
+  branch `fix/subagent-retention-after-19753` off `origin/main`. The
+  earlier 9-file / 409+ / 23- shape grew to address adversarial-review
+  findings: explicit `SlotState` lifecycle enum (replacing
+  `slot_active: bool` + `last_status: Option<AgentStatus>`), V2
+  retirement wired into `Session::maybe_notify_parent_of_terminal_turn`,
+  explicit `Op::Shutdown` send from `retire_finalized_agent` (so #19753's
+  MCP teardown fires deterministically rather than via implicit channel
+  close), deadline-bounded descendant sweep (30 s wall + 64-sweep cap),
+  and a new V2 retirement test
+  (`v2_spawn_agent_releases_slot_after_completion`).
 - [`patches/pr1-subagent-retention-root-teardown.patch`](patches/pr1-subagent-retention-root-teardown.patch)
   — original PR1 patch against `3895ddd6b` (the investigation commit), kept
   for historical reference and provenance.
