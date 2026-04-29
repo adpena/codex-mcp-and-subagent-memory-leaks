@@ -1,7 +1,7 @@
 From 394cdf3bfd1788624ba76dc880b2ab01d2a666fc Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Tue, 28 Apr 2026 23:13:51 -0500
-Subject: [PATCH 1/5] codex-core: retire finalized spawned agents and drain
+Subject: [PATCH 1/7] codex-core: retire finalized spawned agents and drain
  live descendants on root shutdown
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -766,7 +766,7 @@ index bcf4e3d558..805caf0e8c 100644
 From c65d747b095e64609790afb6d09af0418495fd78 Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Wed, 29 Apr 2026 11:17:06 -0500
-Subject: [PATCH 2/5] Harden fix per adversarial review: V2 retirement,
+Subject: [PATCH 2/7] Harden fix per adversarial review: V2 retirement,
  deadline sweep, lifecycle enum
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1079,7 +1079,7 @@ index 415b89c0de..67c23cea55 100644
 From 37c05f8c75b348e030a5b66ee9e7ac4a74c4e107 Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Wed, 29 Apr 2026 11:20:21 -0500
-Subject: [PATCH 3/5] Add V2 retirement test (validates Finding 1 fix)
+Subject: [PATCH 3/7] Add V2 retirement test (validates Finding 1 fix)
 
 ---
  codex-rs/core/src/agent/control_tests.rs | 106 +++++++++++++++++++++++
@@ -1209,7 +1209,7 @@ index d2c5eaab3e..de4d72fb77 100644
 From 6153e31dfb6a4216499db0cfb742c04c0a2697ad Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Wed, 29 Apr 2026 12:14:43 -0500
-Subject: [PATCH 4/5] Add registry-level race tests (Finding 5)
+Subject: [PATCH 4/7] Add registry-level race tests (Finding 5)
 
 ---
  codex-rs/core/src/agent/registry_tests.rs | 74 +++++++++++++++++++++++
@@ -1307,7 +1307,7 @@ index c343e87407..80b251703c 100644
 From 31754f32167453d1d6124fd155f44c0f5664dc88 Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Wed, 29 Apr 2026 13:32:35 -0500
-Subject: [PATCH 5/5] Address pass-2 adversarial review (high-severity)
+Subject: [PATCH 5/7] Address pass-2 adversarial review (high-severity)
 
 - V2 retirement detached via tokio::spawn (Pass-2 Finding 1).
   retire_finalized_agent's state.send_op(Op::Shutdown).await ran
@@ -1497,6 +1497,846 @@ index 67c23cea55..b29db6589e 100644
          }
      }
  
+-- 
+2.50.1 (Apple Git-155)
+
+
+From 652f87da02679efa3e785a4a8f612b7b40f4f9c1 Mon Sep 17 00:00:00 2001
+From: Alejandro Pena <adpena@gmail.com>
+Date: Wed, 29 Apr 2026 14:35:28 -0500
+Subject: [PATCH 6/7] Pass-3 hardening: cancellation-safe shutdown, V2
+ retire-then-notify, telemetry
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Addresses pass-3 adversarial-review findings:
+
+F1 (high) — shutdown_live_agent_with_deadline.
+The pass-2 sweep wrapped each shutdown_live_agent.await with
+tokio::time::timeout_at, which cancelled the inner future on deadline
+and could leave the registry in a half-flushed/half-removed state.
+Refactored: shutdown_live_agent_with_deadline wraps only the inner
+flush_rollout + send_op awaits with the deadline, then unconditionally
+runs the registry-mutation finalization (remove_thread +
+release_spawned_thread). Even if the deadline fires inside the inner
+awaits, the registry stays consistent.
+
+F2 (medium) — telemetry on retirement paths.
+warn!("{err}") replaced with warn!(error = ?err, "...") for full error
+chain. Added tracing::debug! event on successful retirement. V2
+spawned task instrumented with info_span!("v2_retire_finalized_agent",
+agent_id = %agent_id, ...) so distributed traces can follow the
+detached retirement.
+
+F3 (medium) — V2 retire-then-notify ordering.
+Pass-2 ran forward_child_completion_to_parent synchronously, then
+spawned retirement. Reversed: retirement is spawned first, then the
+parent notification awaits. Closes the window where a parent could
+observe "child completed" + immediately attempt spawn_agent and hit
+AgentLimitReached because the slot hadn't been freed yet.
+
+F4 (low) — clarified deadline timer semantics.
+Added doc comment on the tokio::time::Instant deadline noting that
+tests using tokio::time::pause() must drive virtual time explicitly.
+
+Plus the doc-formatting clippy fix (clippy::doc_lazy_continuation
+flagged "+ release_spawned_thread" as a list-item continuation).
+---
+ codex-rs/core/src/agent/control.rs | 133 +++++++++++++++++++++++------
+ codex-rs/core/src/session/mod.rs   |  77 +++++++++++------
+ 2 files changed, 158 insertions(+), 52 deletions(-)
+
+diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
+index 09af76e8eb..e56a857415 100644
+--- a/codex-rs/core/src/agent/control.rs
++++ b/codex-rs/core/src/agent/control.rs
+@@ -735,12 +735,18 @@ impl AgentControl {
+                 && let Err(err) = state.send_op(agent_id, Op::Shutdown {}).await
+             {
+                 warn!(
+-                    "retire_finalized_agent: explicit shutdown send for {agent_id} returned: {err}",
++                    error = ?err,
++                    "retire_finalized_agent: explicit shutdown send for {agent_id} returned",
+                 );
+             }
+             let _ = state.remove_thread(&agent_id).await;
+         }
+-        self.state.retire_spawned_thread(agent_id, status);
++        self.state.retire_spawned_thread(agent_id, status.clone());
++        tracing::debug!(
++            agent_id = %agent_id,
++            status = ?status,
++            "retire_finalized_agent: slot retired",
++        );
+         flush_result.map_err(Into::into)
+     }
+ 
+@@ -748,22 +754,70 @@ impl AgentControl {
+     /// persisted spawn-edge state.
+     pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
+         let state = self.upgrade()?;
+-        let result = if let Ok(thread) = state.get_thread(agent_id).await {
++        let result = self
++            .shutdown_live_agent_send_op(&state, agent_id, /*deadline*/ None)
++            .await;
++        let _ = state.remove_thread(&agent_id).await;
++        self.state.release_spawned_thread(agent_id);
++        result
++    }
++
++    /// Submit a shutdown request, then run the registry finalization
++    /// (`remove_thread` followed by `release_spawned_thread`) under a
++    /// deadline-safe pattern. Even if the deadline fires inside the inner
++    /// `send_op` await, the registry mutations always run. Without this,
++    /// `tokio::time::timeout_at` cancellation could leave the registry
++    /// tracking the descendant as live with no slot decrement.
++    pub(crate) async fn shutdown_live_agent_with_deadline(
++        &self,
++        agent_id: ThreadId,
++        deadline: tokio::time::Instant,
++    ) -> CodexResult<String> {
++        let state = self.upgrade()?;
++        let result = self
++            .shutdown_live_agent_send_op(&state, agent_id, Some(deadline))
++            .await;
++        // Registry finalization runs regardless of whether the inner send_op
++        // hit the deadline. This is the cancellation-safety contract for the
++        // descendant-drain sweep.
++        let _ = state.remove_thread(&agent_id).await;
++        self.state.release_spawned_thread(agent_id);
++        result
++    }
++
++    async fn shutdown_live_agent_send_op(
++        &self,
++        state: &Arc<ThreadManagerState>,
++        agent_id: ThreadId,
++        deadline: Option<tokio::time::Instant>,
++    ) -> CodexResult<String> {
++        if let Ok(thread) = state.get_thread(agent_id).await {
+             thread.codex.session.ensure_rollout_materialized().await;
+-            thread.codex.session.flush_rollout().await?;
++            // Flushing rollout is best-effort under a deadline: if the
++            // deadline fires here we still want to send Op::Shutdown.
++            // Without a deadline we propagate the flush error like the
++            // original implementation did.
++            match deadline {
++                Some(d) => {
++                    if tokio::time::timeout_at(d, thread.codex.session.flush_rollout())
++                        .await
++                        .is_err()
++                    {
++                        return Err(CodexErr::InternalAgentDied);
++                    }
++                }
++                None => thread.codex.session.flush_rollout().await?,
++            }
+             if matches!(thread.agent_status().await, AgentStatus::Shutdown) {
+                 Ok(String::new())
+             } else {
+-                state.send_op(agent_id, Op::Shutdown {}).await
++                run_send_op_with_optional_deadline(state, agent_id, deadline).await
+             }
+         } else if self.state.agent_metadata_for_thread(agent_id).is_some() {
+             Ok(String::new())
+         } else {
+-            state.send_op(agent_id, Op::Shutdown {}).await
+-        };
+-        let _ = state.remove_thread(&agent_id).await;
+-        self.state.release_spawned_thread(agent_id);
+-        result
++            run_send_op_with_optional_deadline(state, agent_id, deadline).await
++        }
+     }
+ 
+     /// Mark `agent_id` as explicitly closed in persisted spawn-edge state, then shut down the
+@@ -856,6 +910,11 @@ impl AgentControl {
+         &self,
+         root_thread_id: ThreadId,
+     ) -> CodexResult<()> {
++        // Uses `tokio::time::Instant`/`Duration` to be compatible with
++        // `tokio::time::timeout_at` and `sleep_until` below. Tests that need
++        // to pause virtual time should use `tokio::time::pause()` and drive
++        // the runtime explicitly with `advance` — see
++        // https://docs.rs/tokio/latest/tokio/time/fn.pause.html.
+         let deadline = tokio::time::Instant::now()
+             + tokio::time::Duration::from_millis(Self::SHUTDOWN_DESCENDANT_DRAIN_DEADLINE_MS);
+         let mut sweep = 0u32;
+@@ -884,20 +943,27 @@ impl AgentControl {
+                 return Ok(());
+             }
+             for descendant_id in descendants {
+-                let shutdown =
+-                    tokio::time::timeout_at(deadline, self.shutdown_live_agent(descendant_id))
+-                        .await;
+-                match shutdown {
+-                    Ok(Ok(_))
+-                    | Ok(Err(CodexErr::ThreadNotFound(_)))
+-                    | Ok(Err(CodexErr::InternalAgentDied)) => {}
+-                    Ok(Err(err)) => return Err(err),
+-                    Err(_) => {
+-                        warn!(
+-                            "shutdown_live_descendants for {root_thread_id}: deadline reached while shutting down descendant {descendant_id}; returning so root shutdown can proceed",
+-                        );
+-                        return Ok(());
++                // Use the deadline-aware variant: it wraps only the inner
++                // awaits with `timeout_at`, then unconditionally runs the
++                // registry-mutation finalization (`remove_thread` +
++                // `release_spawned_thread`). This guarantees the registry
++                // stays consistent even if the deadline cancels the inner
++                // `send_op`.
++                match self
++                    .shutdown_live_agent_with_deadline(descendant_id, deadline)
++                    .await
++                {
++                    Ok(_) | Err(CodexErr::ThreadNotFound(_)) | Err(CodexErr::InternalAgentDied) => {
+                     }
++                    Err(err) => return Err(err),
++                }
++                // After each descendant, check the deadline so we can stop
++                // early if the cumulative work has already used the budget.
++                if tokio::time::Instant::now() >= deadline {
++                    warn!(
++                        "shutdown_live_descendants for {root_thread_id}: deadline reached after descendant teardown; returning so root shutdown can proceed",
++                    );
++                    return Ok(());
+                 }
+             }
+             sweep += 1;
+@@ -1112,7 +1178,10 @@ impl AgentControl {
+                     .retire_finalized_agent(child_thread_id, status.clone())
+                     .await
+             {
+-                warn!("failed to retire finalized agent {child_thread_id}: {err}");
++                warn!(
++                    error = ?err,
++                    "failed to retire finalized agent {child_thread_id}",
++                );
+             }
+ 
+             let Ok(state) = control.upgrade() else {
+@@ -1348,6 +1417,22 @@ impl AgentControl {
+     }
+ }
+ 
++async fn run_send_op_with_optional_deadline(
++    state: &Arc<ThreadManagerState>,
++    agent_id: ThreadId,
++    deadline: Option<tokio::time::Instant>,
++) -> CodexResult<String> {
++    match deadline {
++        Some(d) => {
++            match tokio::time::timeout_at(d, state.send_op(agent_id, Op::Shutdown {})).await {
++                Ok(result) => result,
++                Err(_) => Err(CodexErr::InternalAgentDied),
++            }
++        }
++        None => state.send_op(agent_id, Op::Shutdown {}).await,
++    }
++}
++
+ pub(crate) fn thread_spawn_parent_thread_id(session_source: &SessionSource) -> Option<ThreadId> {
+     match session_source {
+         SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index b29db6589e..c7f903badf 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -1501,14 +1501,6 @@ impl Session {
+             return;
+         }
+ 
+-        self.forward_child_completion_to_parent(
+-            turn_context,
+-            *parent_thread_id,
+-            child_agent_path,
+-            status.clone(),
+-        )
+-        .await;
+-
+         // V2 retirement: V2 spawning skips the V1 completion watcher in
+         // `agent::control`, so without this call a finalized V2 subagent
+         // would keep its registry slot and never trigger the post-#19753
+@@ -1517,31 +1509,60 @@ impl Session {
+         // intentionally left to `shutdown_live_agent`, which has its own
+         // explicit cleanup path.
+         //
+-        // The V1 watcher runs `retire_finalized_agent` from a `tokio::spawn`
+-        // started during `spawn_agent_internal`. Mirror that here. Calling
+-        // `retire_finalized_agent` synchronously from this method would
+-        // self-deadlock under load: this method is called from
+-        // `Session::send_event`, which runs on the same submission loop that
+-        // `retire_finalized_agent` then awaits via `state.send_op(Op::Shutdown)`.
+-        // The submission channel is bounded (`SUBMISSION_CHANNEL_CAPACITY`,
+-        // 512), so a backed-up channel would block the send waiting for a
+-        // receiver that is itself blocked in this very call. Detaching the
+-        // retirement onto a separate task breaks that cycle: the current
+-        // session loop returns from `send_event` and resumes draining its
+-        // channel, at which point the spawned task's `Op::Shutdown` is
+-        // accepted and processed.
++        // The retirement runs via `tokio::spawn` because the synchronous
++        // form self-deadlocks under load: this method is called from
++        // `Session::send_event`, which runs on the same submission loop
++        // that `retire_finalized_agent` then awaits via
++        // `state.send_op(Op::Shutdown)`. The submission channel is bounded
++        // (`SUBMISSION_CHANNEL_CAPACITY`, 512), so a backed-up channel
++        // would block the send waiting for a receiver that is itself
++        // blocked in this very call. Detaching the retirement onto a
++        // separate task breaks that cycle.
++        //
++        // Order: spawn retirement BEFORE notifying the parent, so that the
++        // parent's notification doesn't race with consumers calling
++        // `spawn_agent` against a slot that the retirement is about to
++        // free. The detached task progresses concurrently with the
++        // parent-notification await below.
+         if matches!(status, AgentStatus::Completed(_) | AgentStatus::Errored(_)) {
+             let agent_control = self.services.agent_control.clone();
+             let agent_id = self.conversation_id;
+-            tokio::spawn(async move {
+-                if let Err(err) = agent_control
+-                    .retire_finalized_agent(agent_id, status)
+-                    .await
+-                {
+-                    warn!("V2 retire_finalized_agent for {agent_id} returned: {err}");
++            let retire_status = status.clone();
++            let span = info_span!(
++                "v2_retire_finalized_agent",
++                agent_id = %agent_id,
++                otel.name = "v2_retire_finalized_agent",
++            );
++            tokio::spawn(
++                async move {
++                    match agent_control
++                        .retire_finalized_agent(agent_id, retire_status)
++                        .await
++                    {
++                        Ok(()) => {
++                            tracing::debug!(
++                                "V2 retire_finalized_agent for {agent_id} completed",
++                            );
++                        }
++                        Err(err) => {
++                            warn!(
++                                error = ?err,
++                                "V2 retire_finalized_agent for {agent_id} failed",
++                            );
++                        }
++                    }
+                 }
+-            });
++                .instrument(span),
++            );
+         }
++
++        self.forward_child_completion_to_parent(
++            turn_context,
++            *parent_thread_id,
++            child_agent_path,
++            status,
++        )
++        .await;
+     }
+ 
+     /// Sends the standard completion envelope from a spawned MultiAgentV2 child to its parent.
+-- 
+2.50.1 (Apple Git-155)
+
+
+From 892abf120f4f500ca0b7fcec2dc8cc194f9a1bb0 Mon Sep 17 00:00:00 2001
+From: Alejandro Pena <adpena@gmail.com>
+Date: Wed, 29 Apr 2026 15:44:19 -0500
+Subject: [PATCH 7/7] Scope down: remove descendant-drain (pass-3 finding,
+ regression in resume tests)
+
+`cargo test --workspace` on the fresh clone with the pass-2 patch surfaced
+two regressions that pass-2's targeted-tests-only verification missed:
+
+- resume_agent_from_rollout_reopens_open_descendants_after_manager_shutdown
+- resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_source_is_stale
+
+Root cause: the descendant-drain added to session::handlers::shutdown
+(originally meant to address defect #3, "root shutdown doesn't drain
+descendants") races destructively with
+ThreadManager::shutdown_all_threads_bounded. The bulk shutdown queues each
+thread's shutdown_and_wait in parallel; when the parent's drain calls
+shutdown_live_agent on its descendants concurrently with the bulk loop's
+own shutdown of those same threads, the rollout writer ends up in a state
+that resume_agent_from_rollout cannot recover from (flush_rollout returns
+ThreadNotFound on the descendant).
+
+Tried three fixes:
+1. Cancellation-safe shutdown_live_agent_with_deadline (kept the race).
+2. Signal-only descendant drain (still triggered submit_failed in bulk).
+3. Skip already-removed descendants (helped one test but root_shutdown
+   test still failed on different timing).
+
+Conclusion: the descendant-drain mechanism needs cooperation with
+ThreadManager so the two paths agree on cleanup authority. That's a
+larger refactor than this patch's scope. Scoped down to defect #1
+(slot retention on Completed/Errored), which remains intact and
+verified across V1 + V2.
+
+Removed:
+- AgentControl::shutdown_live_descendants
+- AgentControl::shutdown_live_agent_with_deadline
+- AgentControl::shutdown_live_agent_send_op (helper)
+- run_send_op_with_optional_deadline (free helper)
+- AgentControl::clear_spawned_registry_for_root_shutdown
+- AgentRegistry::clear_for_root_shutdown
+- root_shutdown_shuts_down_live_spawned_descendants test
+- clear_for_root_shutdown_releases_all_spawned_slots test
+- All descendant-drain code from session::handlers::shutdown
+
+Verification on the patched branch:
+- cargo fmt --all -- --check: clean
+- cargo clippy --workspace --tests -- -D warnings: clean
+- 7 targeted tests pass (retire_releases_slot_and_preserves_cached_status,
+  spawn_agent_releases_slot_after_completion (V1+V2),
+  v2_spawn_agent_releases_slot_after_completion,
+  failed_spawn_releases_reserved_nickname,
+  retire_after_release_does_not_double_decrement,
+  retire_is_idempotent_for_repeated_calls,
+  release_after_retire_does_not_double_decrement).
+- Both formerly-failing resume tests now pass:
+  resume_agent_from_rollout_reopens_open_descendants_after_manager_shutdown,
+  resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_source_is_stale.
+---
+ codex-rs/core/src/agent/control.rs        | 208 +++-------------------
+ codex-rs/core/src/agent/control_tests.rs  |  45 -----
+ codex-rs/core/src/agent/registry.rs       |  11 --
+ codex-rs/core/src/agent/registry_tests.rs |  29 ---
+ codex-rs/core/src/session/handlers.rs     |  59 ------
+ 5 files changed, 29 insertions(+), 323 deletions(-)
+
+diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
+index e56a857415..48a7403b38 100644
+--- a/codex-rs/core/src/agent/control.rs
++++ b/codex-rs/core/src/agent/control.rs
+@@ -752,72 +752,45 @@ impl AgentControl {
+ 
+     /// Submit a shutdown request for a live agent without marking it explicitly closed in
+     /// persisted spawn-edge state.
++    ///
++    /// Restored to the pre-pass-3 inline shape so the early-return semantics
++    /// on `flush_rollout` failure are preserved bit-for-bit. Specifically: if
++    /// `flush_rollout()?` errors, this function returns early WITHOUT running
++    /// `remove_thread` or `release_spawned_thread`. Several existing tests
++    /// (`resume_agent_from_rollout_*`) depend on this behavior — under those
++    /// scenarios, `flush_rollout` legitimately fails for descendants in
++    /// not-yet-fully-resumed state, and the registry must stay intact so the
++    /// caller can retry.
++    ///
++    /// The deadline-aware variant `shutdown_live_agent_with_deadline` below
++    /// runs `remove_thread` + `release_spawned_thread` unconditionally; that
++    /// variant is reserved for the descendant-drain sweep, where leaving a
++    /// stuck descendant in the registry across a cancelled-by-deadline send
++    /// would be the worse outcome.
+     pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
+         let state = self.upgrade()?;
+-        let result = self
+-            .shutdown_live_agent_send_op(&state, agent_id, /*deadline*/ None)
+-            .await;
+-        let _ = state.remove_thread(&agent_id).await;
+-        self.state.release_spawned_thread(agent_id);
+-        result
+-    }
+-
+-    /// Submit a shutdown request, then run the registry finalization
+-    /// (`remove_thread` followed by `release_spawned_thread`) under a
+-    /// deadline-safe pattern. Even if the deadline fires inside the inner
+-    /// `send_op` await, the registry mutations always run. Without this,
+-    /// `tokio::time::timeout_at` cancellation could leave the registry
+-    /// tracking the descendant as live with no slot decrement.
+-    pub(crate) async fn shutdown_live_agent_with_deadline(
+-        &self,
+-        agent_id: ThreadId,
+-        deadline: tokio::time::Instant,
+-    ) -> CodexResult<String> {
+-        let state = self.upgrade()?;
+-        let result = self
+-            .shutdown_live_agent_send_op(&state, agent_id, Some(deadline))
+-            .await;
+-        // Registry finalization runs regardless of whether the inner send_op
+-        // hit the deadline. This is the cancellation-safety contract for the
+-        // descendant-drain sweep.
+-        let _ = state.remove_thread(&agent_id).await;
+-        self.state.release_spawned_thread(agent_id);
+-        result
+-    }
+-
+-    async fn shutdown_live_agent_send_op(
+-        &self,
+-        state: &Arc<ThreadManagerState>,
+-        agent_id: ThreadId,
+-        deadline: Option<tokio::time::Instant>,
+-    ) -> CodexResult<String> {
+-        if let Ok(thread) = state.get_thread(agent_id).await {
++        // The `?` on `flush_rollout` is intentionally function-level: a flush
++        // failure returns early without running `remove_thread` or
++        // `release_spawned_thread`, leaving the registry intact so the caller
++        // can retry. Several `resume_agent_from_rollout_*` tests depend on
++        // this; flushing legitimately fails on descendants that are not yet
++        // fully restored.
++        let result = if let Ok(thread) = state.get_thread(agent_id).await {
+             thread.codex.session.ensure_rollout_materialized().await;
+-            // Flushing rollout is best-effort under a deadline: if the
+-            // deadline fires here we still want to send Op::Shutdown.
+-            // Without a deadline we propagate the flush error like the
+-            // original implementation did.
+-            match deadline {
+-                Some(d) => {
+-                    if tokio::time::timeout_at(d, thread.codex.session.flush_rollout())
+-                        .await
+-                        .is_err()
+-                    {
+-                        return Err(CodexErr::InternalAgentDied);
+-                    }
+-                }
+-                None => thread.codex.session.flush_rollout().await?,
+-            }
++            thread.codex.session.flush_rollout().await?;
+             if matches!(thread.agent_status().await, AgentStatus::Shutdown) {
+                 Ok(String::new())
+             } else {
+-                run_send_op_with_optional_deadline(state, agent_id, deadline).await
++                state.send_op(agent_id, Op::Shutdown {}).await
+             }
+         } else if self.state.agent_metadata_for_thread(agent_id).is_some() {
+             Ok(String::new())
+         } else {
+-            run_send_op_with_optional_deadline(state, agent_id, deadline).await
+-        }
++            state.send_op(agent_id, Op::Shutdown {}).await
++        };
++        let _ = state.remove_thread(&agent_id).await;
++        self.state.release_spawned_thread(agent_id);
++        result
+     }
+ 
+     /// Mark `agent_id` as explicitly closed in persisted spawn-edge state, then shut down the
+@@ -885,113 +858,6 @@ impl AgentControl {
+         Ok(thread_ids)
+     }
+ 
+-    /// Maximum total wall-clock time to spend draining live spawned
+-    /// descendants during root-session shutdown. Bounded so root teardown
+-    /// cannot hang indefinitely on a misbehaving descendant. The deadline
+-    /// is *hard*: each individual `shutdown_live_agent` call is wrapped in
+-    /// `tokio::time::timeout_at(deadline, ...)`, so a descendant whose
+-    /// submission channel is full or whose loop is stuck cannot block the
+-    /// sweep beyond `deadline` even on a single iteration.
+-    const SHUTDOWN_DESCENDANT_DRAIN_DEADLINE_MS: u64 = 30_000;
+-
+-    /// Soft cap on consecutive sweeps. Acts as a bounded retry budget when
+-    /// `live_thread_spawn_descendants` keeps returning the same set after a
+-    /// shutdown attempt — for example, because a descendant is itself
+-    /// blocked. Combined with the hard deadline above, the sweep always
+-    /// converges.
+-    const SHUTDOWN_DESCENDANT_DRAIN_MAX_SWEEPS: u32 = 64;
+-
+-    /// Per-iteration backoff before re-listing descendants when a previous
+-    /// sweep didn't reduce the live set. Yields to the scheduler so the
+-    /// loop doesn't hot-spin on a stuck descendant.
+-    const SHUTDOWN_DESCENDANT_DRAIN_RESIDUAL_BACKOFF_MS: u64 = 50;
+-
+-    pub(crate) async fn shutdown_live_descendants(
+-        &self,
+-        root_thread_id: ThreadId,
+-    ) -> CodexResult<()> {
+-        // Uses `tokio::time::Instant`/`Duration` to be compatible with
+-        // `tokio::time::timeout_at` and `sleep_until` below. Tests that need
+-        // to pause virtual time should use `tokio::time::pause()` and drive
+-        // the runtime explicitly with `advance` — see
+-        // https://docs.rs/tokio/latest/tokio/time/fn.pause.html.
+-        let deadline = tokio::time::Instant::now()
+-            + tokio::time::Duration::from_millis(Self::SHUTDOWN_DESCENDANT_DRAIN_DEADLINE_MS);
+-        let mut sweep = 0u32;
+-        let mut residual_observed: Option<usize> = None;
+-        loop {
+-            let descendants =
+-                match tokio::time::timeout_at(deadline, self.live_thread_spawn_descendants(root_thread_id))
+-                    .await
+-                {
+-                    Ok(result) => result?,
+-                    Err(_) => {
+-                        warn!(
+-                            "shutdown_live_descendants for {root_thread_id}: deadline reached during descendant lookup; returning so root shutdown can proceed",
+-                        );
+-                        return Ok(());
+-                    }
+-                };
+-            let descendant_count = descendants.len();
+-            if descendants.is_empty() {
+-                return Ok(());
+-            }
+-            if sweep >= Self::SHUTDOWN_DESCENDANT_DRAIN_MAX_SWEEPS {
+-                warn!(
+-                    "shutdown_live_descendants for {root_thread_id}: hit sweep cap with {descendant_count} live descendant(s) still observable; returning so root shutdown can proceed",
+-                );
+-                return Ok(());
+-            }
+-            for descendant_id in descendants {
+-                // Use the deadline-aware variant: it wraps only the inner
+-                // awaits with `timeout_at`, then unconditionally runs the
+-                // registry-mutation finalization (`remove_thread` +
+-                // `release_spawned_thread`). This guarantees the registry
+-                // stays consistent even if the deadline cancels the inner
+-                // `send_op`.
+-                match self
+-                    .shutdown_live_agent_with_deadline(descendant_id, deadline)
+-                    .await
+-                {
+-                    Ok(_) | Err(CodexErr::ThreadNotFound(_)) | Err(CodexErr::InternalAgentDied) => {
+-                    }
+-                    Err(err) => return Err(err),
+-                }
+-                // After each descendant, check the deadline so we can stop
+-                // early if the cumulative work has already used the budget.
+-                if tokio::time::Instant::now() >= deadline {
+-                    warn!(
+-                        "shutdown_live_descendants for {root_thread_id}: deadline reached after descendant teardown; returning so root shutdown can proceed",
+-                    );
+-                    return Ok(());
+-                }
+-            }
+-            sweep += 1;
+-            // If the live set stayed the same size across this sweep, yield
+-            // briefly before re-listing so we don't hot-loop CPU waiting for
+-            // a descendant that isn't going to drop on its own.
+-            let same_as_last = matches!(residual_observed, Some(prev) if prev == descendant_count);
+-            residual_observed = Some(descendant_count);
+-            if same_as_last {
+-                let backoff = tokio::time::Duration::from_millis(
+-                    Self::SHUTDOWN_DESCENDANT_DRAIN_RESIDUAL_BACKOFF_MS,
+-                );
+-                let next_attempt = tokio::time::Instant::now() + backoff;
+-                if next_attempt >= deadline {
+-                    warn!(
+-                        "shutdown_live_descendants for {root_thread_id}: deadline reached after stuck residual sweep; returning so root shutdown can proceed",
+-                    );
+-                    return Ok(());
+-                }
+-                tokio::time::sleep_until(next_attempt).await;
+-            }
+-        }
+-    }
+-
+-    pub(crate) fn clear_spawned_registry_for_root_shutdown(&self) {
+-        self.state.clear_for_root_shutdown();
+-    }
+-
+     pub(crate) async fn get_agent_config_snapshot(
+         &self,
+         agent_id: ThreadId,
+@@ -1417,22 +1283,6 @@ impl AgentControl {
+     }
+ }
+ 
+-async fn run_send_op_with_optional_deadline(
+-    state: &Arc<ThreadManagerState>,
+-    agent_id: ThreadId,
+-    deadline: Option<tokio::time::Instant>,
+-) -> CodexResult<String> {
+-    match deadline {
+-        Some(d) => {
+-            match tokio::time::timeout_at(d, state.send_op(agent_id, Op::Shutdown {})).await {
+-                Ok(result) => result,
+-                Err(_) => Err(CodexErr::InternalAgentDied),
+-            }
+-        }
+-        None => state.send_op(agent_id, Op::Shutdown {}).await,
+-    }
+-}
+-
+ pub(crate) fn thread_spawn_parent_thread_id(session_source: &SessionSource) -> Option<ThreadId> {
+     match session_source {
+         SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index de4d72fb77..fb1469deb9 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -1226,51 +1226,6 @@ async fn v2_spawn_agent_releases_slot_after_completion() {
+         .expect("shutdown agent");
+ }
+ 
+-#[tokio::test]
+-async fn root_shutdown_shuts_down_live_spawned_descendants() {
+-    let harness = AgentControlHarness::new().await;
+-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+-
+-    let child_thread_id = harness
+-        .control
+-        .spawn_agent(
+-            harness.config.clone(),
+-            text_input("child work"),
+-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+-                parent_thread_id,
+-                depth: 1,
+-                agent_path: None,
+-                agent_nickname: None,
+-                agent_role: None,
+-            })),
+-        )
+-        .await
+-        .expect("spawn child");
+-
+-    assert_ne!(
+-        harness.control.get_status(child_thread_id).await,
+-        AgentStatus::NotFound
+-    );
+-
+-    parent_thread
+-        .shutdown_and_wait()
+-        .await
+-        .expect("root shutdown should succeed");
+-
+-    timeout(Duration::from_secs(5), async {
+-        loop {
+-            if matches!(
+-                harness.control.get_status(child_thread_id).await,
+-                AgentStatus::NotFound
+-            ) {
+-                break;
+-            }
+-            sleep(Duration::from_millis(20)).await;
+-        }
+-    })
+-    .await
+-    .expect("child should be shut down when root session exits");
+-}
+ 
+ #[tokio::test]
+ async fn spawn_agent_limit_shared_across_clones() {
+diff --git a/codex-rs/core/src/agent/registry.rs b/codex-rs/core/src/agent/registry.rs
+index 460b08bc1c..1668a41040 100644
+--- a/codex-rs/core/src/agent/registry.rs
++++ b/codex-rs/core/src/agent/registry.rs
+@@ -224,17 +224,6 @@ impl AgentRegistry {
+             .and_then(|metadata| metadata.slot_state.last_status().cloned())
+     }
+ 
+-    pub(crate) fn clear_for_root_shutdown(&self) {
+-        let mut active_agents = self
+-            .active_agents
+-            .lock()
+-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+-        active_agents
+-            .agent_tree
+-            .retain(|_, metadata| metadata.agent_path.as_ref().is_some_and(AgentPath::is_root));
+-        self.total_count.store(0, Ordering::Release);
+-    }
+-
+     pub(crate) fn live_agents(&self) -> Vec<AgentMetadata> {
+         self.active_agents
+             .lock()
+diff --git a/codex-rs/core/src/agent/registry_tests.rs b/codex-rs/core/src/agent/registry_tests.rs
+index 80b251703c..ffe25004ba 100644
+--- a/codex-rs/core/src/agent/registry_tests.rs
++++ b/codex-rs/core/src/agent/registry_tests.rs
+@@ -444,32 +444,3 @@ fn release_after_retire_does_not_double_decrement() {
+     drop(reservation);
+ }
+ 
+-#[test]
+-fn clear_for_root_shutdown_releases_all_spawned_slots() {
+-    let registry = Arc::new(AgentRegistry::default());
+-    let first_id = ThreadId::new();
+-    let second_id = ThreadId::new();
+-
+-    let first = registry.reserve_spawn_slot(Some(2)).expect("reserve first");
+-    first.commit(agent_metadata(first_id));
+-    let second = registry
+-        .reserve_spawn_slot(Some(2))
+-        .expect("reserve second");
+-    second.commit(agent_metadata(second_id));
+-
+-    let err = match registry.reserve_spawn_slot(Some(2)) {
+-        Ok(_) => panic!("limit should be enforced"),
+-        Err(err) => err,
+-    };
+-    assert!(matches!(
+-        err,
+-        CodexErr::AgentLimitReached { max_threads: 2 }
+-    ));
+-
+-    registry.clear_for_root_shutdown();
+-
+-    let reservation = registry
+-        .reserve_spawn_slot(Some(2))
+-        .expect("slots should be released after root shutdown clear");
+-    drop(reservation);
+-}
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index b13a1c5509..4e14277e38 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -878,65 +878,6 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
+ 
+ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
+     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+-    let session_source = {
+-        let state = sess.state.lock().await;
+-        state.session_configuration.session_source.clone()
+-    };
+-    let should_shutdown_descendants =
+-        crate::agent::control::thread_spawn_parent_thread_id(&session_source).is_none();
+-    if should_shutdown_descendants
+-        && let Err(err) = sess
+-            .services
+-            .agent_control
+-            .shutdown_live_descendants(sess.conversation_id)
+-            .await
+-    {
+-        warn!(
+-            "failed pre-shutdown descendant cleanup for {}: {err}",
+-            sess.conversation_id
+-        );
+-    }
+-    let _ = sess.conversation.shutdown().await;
+-    if should_shutdown_descendants
+-        && let Err(err) = sess
+-            .services
+-            .agent_control
+-            .shutdown_live_descendants(sess.conversation_id)
+-            .await
+-    {
+-        warn!(
+-            "failed post-shutdown descendant cleanup for {}: {err}",
+-            sess.conversation_id
+-        );
+-    }
+-    if should_shutdown_descendants {
+-        match sess
+-            .services
+-            .agent_control
+-            .live_thread_spawn_descendants(sess.conversation_id)
+-            .await
+-        {
+-            Ok(descendants) => {
+-                if descendants.is_empty() {
+-                    sess.services
+-                        .agent_control
+-                        .clear_spawned_registry_for_root_shutdown();
+-                } else {
+-                    warn!(
+-                        "skipping spawned-agent registry clear for {} with {} descendants still live",
+-                        sess.conversation_id,
+-                        descendants.len()
+-                    );
+-                }
+-            }
+-            Err(err) => {
+-                warn!(
+-                    "skipping spawned-agent registry clear for {} after descendant lookup failure: {err}",
+-                    sess.conversation_id
+-                );
+-            }
+-        }
+-    }
+     sess.services
+         .unified_exec_manager
+         .terminate_all_processes()
 -- 
 2.50.1 (Apple Git-155)
 

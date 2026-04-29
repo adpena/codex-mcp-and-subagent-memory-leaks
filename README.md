@@ -104,36 +104,40 @@ CODEOWNERS team: `@openai/codex-core-agent-team`.
 
 ## Summary
 
-Two structural defects in `codex-rs/core` cause finalized spawned subagents
-to retain registry slots and own session resources past the point they
-should have entered shutdown. After [PR #19753](https://github.com/openai/codex/pull/19753)
-(merged 2026-04-28) deterministically tears down `McpConnectionManager` for
-any session that *enters* shutdown, the remaining gap is making the
-finalized subagent enter shutdown at all:
+After [PR #19753](https://github.com/openai/codex/pull/19753) (merged
+2026-04-28) deterministically tears down `McpConnectionManager` for any
+session that *enters* shutdown, one structural defect in `codex-rs/core`
+remains: finalized spawned subagents don't enter shutdown.
 
-1. **Slot retention on finalization.** `Completed` / `Errored` finalization
-   (mapped from `TurnComplete` / `TurnAborted` in `agent/status.rs`) does
-   not retire the spawned slot. A finalized subagent's session stays
-   alive, counts against `agents.max_threads`, and continues to own its
-   `McpConnectionManager` until something else triggers removal. This
-   applies to both `multi_agents` (V1) and `multi_agents_v2` (V2), via
-   different paths.
-2. **No live-descendant drain on root shutdown.**
-   `session::handlers::shutdown` doesn't call
-   `live_thread_spawn_descendants` — even though that traversal already
-   exists at `agent/control.rs:1164` and is used elsewhere by
-   `close_agent`. Subagent threads that are live mid-teardown therefore
-   never enter their own shutdown path.
+**Slot retention on finalization.** `Completed` / `Errored` finalization
+(mapped from `TurnComplete` / `TurnAborted` in `agent/status.rs`) does not
+retire the spawned slot. A finalized subagent's session stays alive,
+counts against `agents.max_threads`, and continues to own its
+`McpConnectionManager` until something else triggers removal. This
+applies to both `multi_agents` (V1) and `multi_agents_v2` (V2), via
+different paths.
 
-### Out of scope (intentionally)
+### Not addressed in this patch
 
 The architectural question of `McpConnectionManager` ownership
 (per-session as today vs. shared / lazy / pooled) is a *design* decision,
-not a *defect*. Per-session ownership produces fanout while subagents are
-**live**, not just after they're finalized; closing defect #1 above only
-shortens the post-finalization tail. Picking a new ownership shape
-deserves its own proposal where the tradeoffs (isolation,
-restart-on-config-change, resource cost) can be evaluated independently.
+not a *defect*. Closing the slot-retention bug only shortens the
+post-finalization tail of resource use; per-session ownership still
+produces fanout while subagents are **live**.
+
+A "root-shutdown drains descendants" mechanism — to clean up live spawned
+descendants when a root session shuts down without going through
+`ThreadManager::shutdown_all_threads_bounded` — was prototyped but
+removed: the implementation raced destructively with the bulk-shutdown
+loop. Both paths called `shutdown_live_agent` on the same descendants in
+parallel, leaving the rollout writer in a state that
+`resume_agent_from_rollout` couldn't recover from. Two regression tests
+([`resume_agent_from_rollout_reopens_open_descendants_after_manager_shutdown`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control_tests.rs#L2467)
+and
+[`resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_source_is_stale`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control_tests.rs#L2558))
+surface that regression. A clean fix needs cooperation with
+`ThreadManager` so the two paths agree on cleanup authority — that's
+larger than this patch's scope.
 
 ### Soak telemetry
 
