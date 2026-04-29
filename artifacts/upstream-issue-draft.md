@@ -127,11 +127,73 @@ one worker produced:
 | `mcp_spawned`         | 7     |
 | `mcp_dropped`         | 7     |
 
-(The `CODEX_DEBUG_AGENT_LIFECYCLE` / `CODEX_DEBUG_MCP_LIFECYCLE` /
-`CODEX_DEBUG_THREAD_LISTENERS` log hooks the harness depended on appear to have
-been removed in the meantime; I'm happy to update the harness or add a small
-diagnostic trace event behind a feature flag if the team would find current
-telemetry useful.)
+I tried to re-run the harness against current `main` and discovered that the
+`CODEX_DEBUG_AGENT_LIFECYCLE` / `CODEX_DEBUG_MCP_LIFECYCLE` /
+`CODEX_DEBUG_THREAD_LISTENERS` env vars and the corresponding lifecycle log
+strings (`"reserved spawned-agent slot"`, `"released spawned-agent slot"`,
+`"spawned stdio MCP server process"`, `"dropping MCP process-group guard"`) have
+been removed since. Rather than re-introducing diagnostic plumbing in this
+report, I've included verification commands and unit-test outlines below that
+the team can run directly. I'm happy to refresh the harness against whatever
+telemetry surface is currently preferred if that would be useful.
+
+### Verification you can run in 30 seconds
+
+Confirming the structural defects without trusting my analysis:
+
+```bash
+# (1) No retirement/finalization path exists in the agent module:
+git grep -nE 'retire|slot_active|last_status|cached_status' codex-rs/core/src/agent/
+#   → expected: 0 matches
+
+# (2) release_spawned_thread is only called from two sites, neither on
+#     Completed/Errored finalization:
+git grep -n 'release_spawned_thread' codex-rs/core/src/
+#   → expected: definition at registry.rs:99, plus call sites at
+#     control.rs:693 (InternalAgentDied) and control.rs:714 (shutdown_live_agent)
+
+# (3) Root-session shutdown does not call live_thread_spawn_descendants:
+git grep -n 'live_thread_spawn_descendants' codex-rs/core/src/session/
+#   → expected: 0 matches in session/ (the function exists at
+#     agent/control.rs:1164 and is used only by close_agent paths)
+```
+
+### Suggested unit-test outlines
+
+These are sketches, not runnable code (I haven't built the project on current
+`main`). They're intended as starting points for tests the team could add to
+`codex-rs/core/src/agent/control_tests.rs`:
+
+```rust
+// Demonstrates defect #1: Completed finalization does not release the slot.
+#[tokio::test]
+async fn completed_finalization_does_not_release_spawned_slot() {
+    // Build an AgentControl with a spawned-thread limit of e.g. 2.
+    // Spawn an agent: registry.live_agents().len() == 1.
+    // Drive it to Completed via on_event(TurnComplete{...}).
+    // Wait for control.get_status(thread_id) == Completed.
+    // Assert registry.live_agents().len() is STILL 1.
+    //
+    // Expected current behavior: assertion holds — the slot is still counted.
+    // Intended behavior: a finalized agent should release the slot while
+    // preserving cached status for wait_agent / list_agents / resume_agent.
+}
+
+// Demonstrates defect #2: root-session shutdown does not drain live spawned
+// descendants.
+#[tokio::test]
+async fn root_shutdown_does_not_drain_live_spawned_descendants() {
+    // Build a root session that has spawned a live descendant.
+    // Confirm control.live_thread_spawn_descendants(root_id) returns [child_id].
+    // Call session::handlers::shutdown(&session, sub_id).
+    // Assert the descendant is still observable as a live thread afterwards.
+    //
+    // Expected current behavior: descendant survives shutdown.
+    // Intended behavior: root-session shutdown should drain live descendants
+    // (the live_thread_spawn_descendants traversal already exists for use by
+    // close_agent at agent/control.rs:735, 777).
+}
+```
 
 ## What is the expected behavior?
 
