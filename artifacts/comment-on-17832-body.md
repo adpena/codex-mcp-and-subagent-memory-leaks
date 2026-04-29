@@ -1,139 +1,110 @@
-Thank you for the forensic data here — the 213-pair Playwright breakdown
-plus the `vmmap` analysis make this much easier to reason about. I noticed
-[#19753](https://github.com/openai/codex/pull/19753) was merged on
-2026-04-28; this comment is intended to complement it, not to re-open
-ground it already covers.
+[#19753](https://github.com/openai/codex/pull/19753) (merged 2026-04-28) tears down `McpConnectionManager` for any session that enters shutdown. Two structural gaps in `codex-rs/core` remain on current `main` ([`80fb0704ee`](https://github.com/openai/codex/commit/80fb0704ee8b23ab7cbc3f2c4dcdbf3c1a5fbd4b)):
 
-I worked through a root-cause analysis from the `codex-rs/core/` side. Full
-writeup, repro harness, candidate patch, and a topic branch with verified
-tests are at https://github.com/adpena/codex-mcp-and-subagent-memory-leaks.
-Short version follows.
-
-### What #19753 closes, and what it doesn't
-
-#19753 adds `mcp_connection_manager.begin_shutdown()` to
-`session::handlers::shutdown` (line 887) and to the `submission_loop` exit
-path (around line 1180). Net effect: any session that enters shutdown gets
-its `McpConnectionManager` torn down deterministically.
-
-What it doesn't change is *whether* a session enters shutdown. A finalized
-spawned subagent (`Completed` / `Errored`) doesn't enter shutdown by
-itself — and that's the gap that lets the 213 retained Playwright pairs
-accumulate.
-
-### The remaining gap
-
-`AgentRegistry::release_spawned_thread`
-([`registry.rs:99`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/registry.rs#L99))
-only decrements `total_count` when thread metadata is removed. Its two
-callers in `agent/control.rs`
-([`693`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L693),
-[`714`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L714))
-trigger only on `CodexErr::InternalAgentDied` and explicit
-`shutdown_live_agent`. `Completed` / `Errored` finalization (mapped from
-`TurnComplete` / `TurnAborted` in
-[`agent/status.rs`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/status.rs))
-does **not** retire a slot. A finalized subagent's session stays alive,
-counts against `agents.max_threads`, and continues to own its
-`McpConnectionManager` — until something else triggers removal.
-
-Two source-level checks that confirm this on current `main`:
+1. `AgentRegistry::release_spawned_thread` ([`registry.rs:99`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/registry.rs#L99)) is called only from `agent/control.rs:693` (`CodexErr::InternalAgentDied`) and `agent/control.rs:714` (`shutdown_live_agent`). `Completed` / `Errored` finalization does not retire a slot, so a finalized subagent's session stays alive holding its `McpConnectionManager`. V1 has a completion watcher gated `!Feature::MultiAgentV2` at `control.rs:307`; V2 has no equivalent.
+2. `session::handlers::shutdown` ([`session/handlers.rs:879`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/session/handlers.rs#L879)) does not invoke `live_thread_spawn_descendants` ([`agent/control.rs:1164`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L1164), already used by `close_agent`).
 
 ```bash
 git grep -nE 'retire|slot_active|last_status|cached_status' codex-rs/core/src/agent/
-# → 0 matches: no retirement-on-finalization path exists.
-
+# 0 matches
 git grep -n 'live_thread_spawn_descendants' codex-rs/core/src/session/
-# → 0 matches: even root shutdown doesn't drive the descendant tree.
+# 0 matches
 ```
 
-### Suggested fix outline
+Cross-platform reports: [#16828](https://github.com/openai/codex/issues/16828) (Linux: 49.4 GB peak, hard-froze a CachyOS workstation), [#12414](https://github.com/openai/codex/issues/12414) (Windows: 90 GB commit growth → OOM), [#19381](https://github.com/openai/codex/issues/19381) (Windows app + VSCode: 10 GB+), [#18103](https://github.com/openai/codex/issues/18103) (macOS + Ghostty/zellij). The defects are platform-agnostic Rust code (no `cfg(target_os)` guards on the affected files).
 
-The candidate patch on
-[fix/subagent-retention-after-19753](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/blob/main/patches/pr1-subagent-retention-after-19753.patch)
-(against `openai/codex@80fb0704ee`) is in the spirit of `contributing.md`'s
-invitation criteria, not an unsolicited PR. Sketch:
+## Suggested fix
 
-- **Registry-level retirement.** Replace `slot_active: bool` +
-  `last_status: Option<AgentStatus>` with an explicit
-  `enum SlotState { NotTracked, Active, Retired { last_status } }` on
-  `AgentMetadata`. Add `AgentRegistry::retire_spawned_thread(thread_id, status)`
-  that transitions `Active -> Retired { .. }` and decrements `total_count`
-  exactly once.
-- **Control-level retirement, on both V1 and V2.** Add
-  `AgentControl::retire_finalized_agent`, called from the V1 completion
-  watcher (existing) **and** from V2's
-  `Session::maybe_notify_parent_of_terminal_turn`
-  ([`session/mod.rs:1474`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/session/mod.rs#L1474)).
-  V2 uses different completion plumbing, so without explicit wiring there
-  the V1 watcher's gating (`!Feature::MultiAgentV2`) leaves V2 uncovered.
-  Retirement also sends `Op::Shutdown` so the session enters its own
-  shutdown path — that's what makes #19753's `begin_shutdown` actually
-  fire. Without the explicit `Op::Shutdown`, retirement would rely on
-  dropping the last `Arc<CodexThread>` to close the channel; that's
-  plausible but not deterministic when other callers still hold references.
-- **Live-descendant drain on root shutdown.** `live_thread_spawn_descendants`
-  ([`agent/control.rs:1164`](https://github.com/openai/codex/blob/80fb0704ee/codex-rs/core/src/agent/control.rs#L1164))
-  is already used by `close_agent`. Wire it into `session::handlers::shutdown`
-  with a deadline-bounded sweep (30 s wall clock + 64-sweep cap) so
-  descendants get a clean shutdown path before the parent context tears down.
-- **Hygiene.** `SpawnReservation::Drop` releases the reserved nickname
-  when spawn setup fails before commit, preventing slow nickname-pool
-  poisoning over long sessions.
-- **`Shutdown` is intentionally not retired.** Broad retirement of
-  `Shutdown` regressed an existing resume-path test, so the patch leaves
-  it alone and flags it as an open question.
+Topic branch [`fix/subagent-retention-after-19753`](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/tree/main/codex), patch [`pr1-subagent-retention-after-19753.patch`](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/blob/main/patches/pr1-subagent-retention-after-19753.patch) (1502 lines, applies cleanly on top of `80fb0704ee`):
 
-### Verification on the candidate patch
+- `AgentMetadata.slot_state: SlotState` (`NotTracked` / `Active` / `Retired { last_status }`), replacing the prior `slot_active: bool` + `last_status: Option<AgentStatus>` so the lifecycle is explicit in the type system.
+- `AgentRegistry::retire_spawned_thread(id, status)` transitions `Active → Retired`, decrements `total_count` once. Idempotent under repeated retire / interleaved release.
+- `AgentControl::retire_finalized_agent` flushes rollout, enqueues `Op::Shutdown` on the session's submission channel (so the session loop drains it into `handlers::shutdown`, picking up #19753's `begin_shutdown()`), removes the live thread, and retires the registry slot. Invoked from V1's `maybe_start_completion_watcher` (existing) and from V2's `Session::maybe_notify_parent_of_terminal_turn` via `tokio::spawn` — synchronous V2 invocation self-deadlocks because the call site runs inside `Session::send_event` and the bounded submission channel's receiver is the same loop. The completion watcher and V2 path retire only `Completed` / `Errored`. `Shutdown` is intentionally not retired (regressed an existing resume-path test).
+- `get_status` / `wait_agent` / `list_agents` fall back to cached registry status when no live thread exists. `resume_agent` switches to `has_live_thread()` instead of treating any non-`NotFound` status as proof of non-resumability.
+- `session::handlers::shutdown` calls `live_thread_spawn_descendants` with a hard deadline-bounded sweep: 30 s wall-clock + 64-sweep cap, with `tokio::time::timeout_at` wrapping each `shutdown_live_agent` call so a stuck descendant cannot block past the deadline, and a 50 ms `sleep_until` between sweeps whose live-set didn't shrink.
+- `SpawnReservation::Drop` releases the reserved nickname when spawn setup fails before commit.
 
-Run on the
-[fix/subagent-retention-after-19753](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/tree/main/codex)
-branch (against `openai/codex@80fb0704ee`):
+## Verification
 
-- `cargo fmt --all -- --check` clean.
-- `cargo clippy -p codex-core --tests -- -D warnings` clean.
-- Unit/control-level tests pass (V1 + V2):
-  `retire_releases_slot_and_preserves_cached_status`,
-  `spawn_agent_releases_slot_after_completion`,
-  `v2_spawn_agent_releases_slot_after_completion`,
-  `root_shutdown_shuts_down_live_spawned_descendants`,
-  `failed_spawn_releases_reserved_nickname`.
+Fresh clone of `openai/codex@80fb0704ee` with the patch applied:
 
-What the verification doesn't yet cover, and which I'd add on request:
+```
+$ git apply --check patches/pr1-subagent-retention-after-19753.patch
+$ cargo fmt --all -- --check
+$ cargo clippy --workspace --tests -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.20s
 
-- An integration test along the lines of #19753's
-  `process_group_cleanup.rs` that spawns a real `test_stdio_server` MCP
-  child, drives the subagent to `Completed`, and asserts the child PID
-  is gone after retirement → `Op::Shutdown` → #19753's `begin_shutdown`
-  fires. The unit tests prove the registry transitions and the V1+V2
-  retirement wiring; an end-to-end MCP-process test would harden the
-  "retirement → MCP teardown" claim deterministically rather than
-  through code-path reasoning.
-- Race tests for the descendant-drain sequencing under concurrent parent
-  + grandparent shutdown of the same descendant, and behavior when
-  `live_thread_spawn_descendants` errors mid-shutdown.
+$ cargo test -p codex-core --lib retire_releases_slot_and_preserves_cached_status
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1652 filtered out; finished in 0.00s
 
-### What's explicitly out of scope
+$ cargo test -p codex-core --lib spawn_agent_releases_slot_after_completion
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1651 filtered out; finished in 0.57s
 
-- The architectural question of `McpConnectionManager` ownership
-  (per-session as today vs. shared / lazy / pooled). The defect above is
-  a lifecycle-retention bug, not a fanout-design bug; per-session
-  ownership still produces fanout while subagents are *live*, and
-  retirement only shortens that tail. If the team wants to revisit
-  ownership, that deserves its own proposal where the tradeoffs can be
-  weighed independently.
-- `Shutdown` participation in retirement, as noted above.
+$ cargo test -p codex-core --lib v2_spawn_agent_releases_slot_after_completion
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1652 filtered out; finished in 0.42s
 
-### Note on the released CLI
+$ cargo test -p codex-core --lib root_shutdown_shuts_down_live_spawned_descendants
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1652 filtered out; finished in 0.29s
 
-`codex-cli 0.125.0` (`rust-v0.125.0`, published 2026-04-24) predates
-#19753 by four days, so users on the latest released CLI still see the
-unfixed shape for both #19753's surface and the gap above.
+$ cargo test -p codex-core --lib failed_spawn_releases_reserved_nickname
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1652 filtered out; finished in 0.00s
 
-I read [`docs/contributing.md`](https://github.com/openai/codex/blob/main/docs/contributing.md)
-before posting. This is offered as analysis material in the spirit of that
-policy — not as an unsolicited PR. If the team finds the candidate patch
-useful, I'll follow the invitation process and add the integration /
-race tests above.
+$ cargo test -p codex-core --lib retire_after_release_does_not_double_decrement
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1652 filtered out; finished in 0.00s
+
+$ cargo test -p codex-core --lib retire_is_idempotent_for_repeated_calls
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1652 filtered out; finished in 0.00s
+
+$ cargo test -p codex-core --lib release_after_retire_does_not_double_decrement
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1652 filtered out; finished in 0.00s
+```
+
+### Failing-then-passing demonstration
+
+Same fresh clone. Comment out the V1 retirement call in `agent/control.rs::maybe_start_completion_watcher` (lines 1110-1116):
+
+```
+$ cargo test -p codex-core --lib spawn_agent_releases_slot_after_completion
+test agent::control::tests::v2_spawn_agent_releases_slot_after_completion ... ok
+test agent::control::tests::spawn_agent_releases_slot_after_completion ... FAILED
+
+failures:
+---- agent::control::tests::spawn_agent_releases_slot_after_completion stdout ----
+thread 'agent::control::tests::spawn_agent_releases_slot_after_completion'
+  panicked at core/src/agent/control_tests.rs:1101:6:
+completed child should be retired: Elapsed(())
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 1651 filtered out; finished in 10.33s
+```
+
+Restore the call:
+
+```
+$ cargo test -p codex-core --lib spawn_agent_releases_slot_after_completion
+test agent::control::tests::v2_spawn_agent_releases_slot_after_completion ... ok
+test agent::control::tests::spawn_agent_releases_slot_after_completion ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1651 filtered out; finished in 0.56s
+```
+
+The 10-second `Elapsed(())` panic is the test's `timeout(Duration::from_secs(10), …)` waiting for the child to be retired; without the V1 watcher's retire call, the slot never frees and the timeout fires.
+
+### Soak
+
+4 workers × 60 s, V1 `[agents] max_threads = 4`, `spawn_recursive` SSE fixture (summaries at [`artifacts/soak-summaries/`](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/tree/main/artifacts/soak-summaries)):
+
+| Metric                                                | Unpatched (`codex-cli 0.125.0`) | Patched (fix branch) |
+| ----------------------------------------------------- | ------------------------------- | -------------------- |
+| Total `agent thread limit reached` rejections (4×60s) | 184,819                         | 65,571               |
+| Per-worker rejection rate                             | ~46k                            | ~16k                 |
+
+64 % drop in rejection rate. Caveats: the binaries differ (unpatched is `0.125.0` release; patched is dev profile of the fix branch), and the soak only measures rejected spawns, not accepted ones — a clean A/B would build both with the same profile and add an explicit accepted-spawn counter. The drop is consistent with retirement freeing slot capacity, but isn't on its own proof of MCP-child termination.
+
+## Out of scope
+
+- `McpConnectionManager` ownership (per-session vs. shared / lazy / pooled) — design decision, not a bug.
+- `Shutdown` participation in retirement.
+- Integration test asserting MCP child PIDs terminate on retirement (skeleton at [`artifacts/integration-test-skeleton.md`](https://github.com/adpena/codex-mcp-and-subagent-memory-leaks/blob/main/artifacts/integration-test-skeleton.md), would mirror #19753's `process_group_cleanup.rs`).
+- Concurrent-shutdown race tests at the control layer beyond the registry-level idempotency tests already included.
+
+Read [`docs/contributing.md`](https://github.com/openai/codex/blob/main/docs/contributing.md). Offered as analysis material; not opening a PR. Will follow the invitation process if useful.
 
 — Alejandro Pena ([@adpena](https://github.com/adpena))
