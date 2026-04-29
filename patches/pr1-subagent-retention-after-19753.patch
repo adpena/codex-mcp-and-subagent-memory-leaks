@@ -1,7 +1,7 @@
 From 394cdf3bfd1788624ba76dc880b2ab01d2a666fc Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Tue, 28 Apr 2026 23:13:51 -0500
-Subject: [PATCH 1/3] codex-core: retire finalized spawned agents and drain
+Subject: [PATCH 1/4] codex-core: retire finalized spawned agents and drain
  live descendants on root shutdown
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -766,7 +766,7 @@ index bcf4e3d558..805caf0e8c 100644
 From c65d747b095e64609790afb6d09af0418495fd78 Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Wed, 29 Apr 2026 11:17:06 -0500
-Subject: [PATCH 2/3] Harden fix per adversarial review: V2 retirement,
+Subject: [PATCH 2/4] Harden fix per adversarial review: V2 retirement,
  deadline sweep, lifecycle enum
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1079,7 +1079,7 @@ index 415b89c0de..67c23cea55 100644
 From 37c05f8c75b348e030a5b66ee9e7ac4a74c4e107 Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Wed, 29 Apr 2026 11:20:21 -0500
-Subject: [PATCH 3/3] Add V2 retirement test (validates Finding 1 fix)
+Subject: [PATCH 3/4] Add V2 retirement test (validates Finding 1 fix)
 
 ---
  codex-rs/core/src/agent/control_tests.rs | 106 +++++++++++++++++++++++
@@ -1202,6 +1202,104 @@ index d2c5eaab3e..de4d72fb77 100644
  #[tokio::test]
  async fn root_shutdown_shuts_down_live_spawned_descendants() {
      let harness = AgentControlHarness::new().await;
+-- 
+2.50.1 (Apple Git-155)
+
+
+From 6153e31dfb6a4216499db0cfb742c04c0a2697ad Mon Sep 17 00:00:00 2001
+From: Alejandro Pena <adpena@gmail.com>
+Date: Wed, 29 Apr 2026 12:14:43 -0500
+Subject: [PATCH 4/4] Add registry-level race tests (Finding 5)
+
+---
+ codex-rs/core/src/agent/registry_tests.rs | 74 +++++++++++++++++++++++
+ 1 file changed, 74 insertions(+)
+
+diff --git a/codex-rs/core/src/agent/registry_tests.rs b/codex-rs/core/src/agent/registry_tests.rs
+index c343e87407..80b251703c 100644
+--- a/codex-rs/core/src/agent/registry_tests.rs
++++ b/codex-rs/core/src/agent/registry_tests.rs
+@@ -370,6 +370,80 @@ fn retire_releases_slot_and_preserves_cached_status() {
+     );
+ }
+ 
++/// Race test (Finding 5): explicit `release_spawned_thread` followed by
++/// `retire_spawned_thread` on the same thread must not double-decrement
++/// the shared spawn count. After release the metadata is gone, so retire
++/// is a no-op rather than a second decrement.
++#[test]
++fn retire_after_release_does_not_double_decrement() {
++    let registry = Arc::new(AgentRegistry::default());
++    let thread_id = ThreadId::new();
++    let reservation = registry.reserve_spawn_slot(Some(1)).expect("reserve slot");
++    reservation.commit(agent_metadata(thread_id));
++
++    registry.release_spawned_thread(thread_id);
++    // Idempotent: retire after release has no effect on the shared count.
++    registry.retire_spawned_thread(thread_id, AgentStatus::Completed(Some("done".to_string())));
++
++    let reservation = registry
++        .reserve_spawn_slot(Some(1))
++        .expect("released slot should be available");
++    drop(reservation);
++}
++
++/// Race test (Finding 5): a second `retire_spawned_thread` for the same
++/// thread (e.g., the V1 completion watcher and V2 notification path both
++/// firing for the same finalized agent) must not double-decrement. The
++/// first retire transitions `Active -> Retired { .. }`; the second sees
++/// `slot_state.is_active() == false` and leaves the count alone.
++#[test]
++fn retire_is_idempotent_for_repeated_calls() {
++    let registry = Arc::new(AgentRegistry::default());
++    let thread_id = ThreadId::new();
++    let reservation = registry.reserve_spawn_slot(Some(1)).expect("reserve slot");
++    reservation.commit(agent_metadata(thread_id));
++
++    registry.retire_spawned_thread(thread_id, AgentStatus::Completed(Some("first".to_string())));
++    // Second retirement with a different status. Must not double-decrement.
++    registry.retire_spawned_thread(thread_id, AgentStatus::Errored("second".to_string()));
++
++    // Slot is freed exactly once: capacity 1 still has room for one new agent.
++    let reservation = registry
++        .reserve_spawn_slot(Some(1))
++        .expect("retired slot should remain released");
++    drop(reservation);
++
++    // The cached status is the latest one written.
++    assert_eq!(
++        registry.cached_status_for_thread(thread_id),
++        Some(AgentStatus::Errored("second".to_string()))
++    );
++}
++
++/// Race test (Finding 5): retire then explicit release. The first retire
++/// already decremented the shared count and flipped the slot state to
++/// `Retired`. Releasing the metadata afterwards must not decrement again.
++#[test]
++fn release_after_retire_does_not_double_decrement() {
++    let registry = Arc::new(AgentRegistry::default());
++    let thread_id = ThreadId::new();
++    let reservation = registry.reserve_spawn_slot(Some(1)).expect("reserve slot");
++    reservation.commit(agent_metadata(thread_id));
++
++    registry.retire_spawned_thread(thread_id, AgentStatus::Completed(Some("done".to_string())));
++    // Now explicitly release the metadata too. The retire already decremented;
++    // release must observe `slot_state == Retired` (not Active) and skip the
++    // decrement.
++    registry.release_spawned_thread(thread_id);
++
++    // Capacity 1 still has room for one new agent. If release double-decremented
++    // here, the count would go to -1 and the next reserve would behave oddly.
++    let reservation = registry
++        .reserve_spawn_slot(Some(1))
++        .expect("slot should remain released after retire+release");
++    drop(reservation);
++}
++
+ #[test]
+ fn clear_for_root_shutdown_releases_all_spawned_slots() {
+     let registry = Arc::new(AgentRegistry::default());
 -- 
 2.50.1 (Apple Git-155)
 
