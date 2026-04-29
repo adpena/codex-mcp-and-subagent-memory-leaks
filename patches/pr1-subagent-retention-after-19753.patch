@@ -1,4 +1,4 @@
-From 5fe20e7bdcc473ac6ca5a73aec6aa1b90cee9de8 Mon Sep 17 00:00:00 2001
+From c44da3e7c5d955a2d437e662b8ba88283309b447 Mon Sep 17 00:00:00 2001
 From: Alejandro Pena <adpena@gmail.com>
 Date: Wed, 29 Apr 2026 16:50:26 -0500
 Subject: [PATCH] codex-core: retire finalized spawned agents to release slot
@@ -67,14 +67,14 @@ Verification on a fresh openai/codex@80fb0704ee clone with this patch:
  codex-rs/core/src/agent/control.rs            | 117 +++++++++-
  codex-rs/core/src/agent/control_tests.rs      | 214 +++++++++++++++++-
  codex-rs/core/src/agent/registry.rs           |  91 +++++++-
- codex-rs/core/src/agent/registry_tests.rs     | 104 ++++++++-
+ codex-rs/core/src/agent/registry_tests.rs     | 103 ++++++++-
  codex-rs/core/src/session/handlers.rs         |   1 -
  codex-rs/core/src/session/mod.rs              |  55 +++++
  .../handlers/multi_agents/resume_agent.rs     |   7 +-
  .../src/tools/handlers/multi_agents/wait.rs   |   3 +-
  codex-rs/core/tests/common/lib.rs             |   4 +
  codex-rs/core/tests/suite/mod.rs              |   4 +
- 10 files changed, 576 insertions(+), 24 deletions(-)
+ 10 files changed, 575 insertions(+), 24 deletions(-)
 
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
 index 19ef2a54fe..48a7403b38 100644
@@ -679,7 +679,7 @@ index 1acd73085f..1668a41040 100644
                  self.state.release_reserved_agent_path(&agent_path);
              }
 diff --git a/codex-rs/core/src/agent/registry_tests.rs b/codex-rs/core/src/agent/registry_tests.rs
-index fc172fb336..ffe25004ba 100644
+index fc172fb336..6b21b11c52 100644
 --- a/codex-rs/core/src/agent/registry_tests.rs
 +++ b/codex-rs/core/src/agent/registry_tests.rs
 @@ -1,5 +1,6 @@
@@ -711,7 +711,7 @@ index fc172fb336..ffe25004ba 100644
  }
  
  #[test]
-@@ -348,3 +349,98 @@ fn committed_agent_path_is_indexed_until_release() {
+@@ -348,3 +349,97 @@ fn committed_agent_path_is_indexed_until_release() {
          None
      );
  }
@@ -809,7 +809,6 @@ index fc172fb336..ffe25004ba 100644
 +        .expect("slot should remain released after retire+release");
 +    drop(reservation);
 +}
-+
 diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
 index 4965cdb389..4e14277e38 100644
 --- a/codex-rs/core/src/session/handlers.rs
