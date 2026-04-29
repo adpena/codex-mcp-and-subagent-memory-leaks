@@ -1,0 +1,106 @@
+{
+  "out_dir": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/current-main-20260428-212049",
+  "workers": [
+    {
+      "name": "worker-00",
+      "scenario": "spawn_recursive",
+      "pid": 67692,
+      "exit_code": 1,
+      "log_path": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/current-main-20260428-212049/worker-00/codex.log",
+      "lifecycle_counts": {
+        "agent_slot_reserved": 0,
+        "agent_slot_released": 0,
+        "mcp_spawned": 0,
+        "mcp_dropped": 0
+      }
+    },
+    {
+      "name": "worker-01",
+      "scenario": "spawn_recursive",
+      "pid": 68876,
+      "exit_code": 1,
+      "log_path": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/current-main-20260428-212049/worker-01/codex.log",
+      "lifecycle_counts": {
+        "agent_slot_reserved": 0,
+        "agent_slot_released": 0,
+        "mcp_spawned": 0,
+        "mcp_dropped": 0
+      }
+    },
+    {
+      "name": "worker-02",
+      "scenario": "spawn_recursive",
+      "pid": 70388,
+      "exit_code": 1,
+      "log_path": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/current-main-20260428-212049/worker-02/codex.log",
+      "lifecycle_counts": {
+        "agent_slot_reserved": 0,
+        "agent_slot_released": 0,
+        "mcp_spawned": 0,
+        "mcp_dropped": 0
+      }
+    },
+    {
+      "name": "worker-03",
+      "scenario": "spawn_recursive",
+      "pid": 71892,
+      "exit_code": 1,
+      "log_path": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/current-main-20260428-212049/worker-03/codex.log",
+      "lifecycle_counts": {
+        "agent_slot_reserved": 0,
+        "agent_slot_released": 0,
+        "mcp_spawned": 0,
+        "mcp_dropped": 0
+      }
+    },
+    {
+      "name": "worker-04",
+      "scenario": "spawn_recursive",
+      "pid": 73396,
+      "exit_code": 1,
+      "log_path": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/current-main-20260428-212049/worker-04/codex.log",
+      "lifecycle_counts": {
+        "agent_slot_reserved": 0,
+        "agent_slot_released": 0,
+        "mcp_spawned": 0,
+        "mcp_dropped": 0
+      }
+    },
+    {
+      "name": "worker-05",
+      "scenario": "spawn_recursive",
+      "pid": 74908,
+      "exit_code": 1,
+      "log_path": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/current-main-20260428-212049/worker-05/codex.log",
+      "lifecycle_counts": {
+        "agent_slot_reserved": 0,
+        "agent_slot_released": 0,
+        "mcp_spawned": 0,
+        "mcp_dropped": 0
+      }
+    }
+  ],
+  "survivors": [
+    {
+      "pid": 67685,
+      "ppid": 70676,
+      "pgid": 67685,
+      "rss_kb": 2704,
+      "vsz_kb": 442206032,
+      "stat": "Ss",
+      "etime": "01:31",
+      "command": "/bin/zsh -c source /Users/adpena/.claude/shell-snapshots/snapshot-zsh-1777425185601-f5hte6.sh 2>/dev/null || true && export CODEX_COMPANION_SESSION_ID='68e40ddd-3373-4109-9054-80cac6544ffb'\\012export CLAUDE_PLUGIN_DATA='/Users/adpena/.claude/plugins/data/codex-openai-codex'\\012: && setopt NO_EXTENDED_GLOB 2>/dev/null || true && eval 'CODEX_BIN=/opt/homebrew/bin/codex; STDIO_BIN=/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex-pr2/codex-rs/target/release/test_stdio_server; OUT=/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/current-main-$(date +%Y%m%d-%H%M%S); mkdir -p \"$OUT\" && cd /Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks && python3 artifacts/soak_codex_concurrency.py --workers 6 --duration-sec 90 --spawn-interval-ms 400 --sample-interval-sec 2 --debug-lifecycle --scenarios spawn_recursive --codex-bin \"$CODEX_BIN\" --stdio-server-bin \"$STDIO_BIN\" --out-dir \"$OUT\" 2>&1 | tail -50' < /dev/null && pwd -P >| /tmp/claude-4d83-cwd"
+    },
+    {
+      "pid": 67690,
+      "ppid": 67685,
+      "pgid": 67685,
+      "rss_kb": 24608,
+      "vsz_kb": 442197424,
+      "stat": "S",
+      "etime": "01:31",
+      "command": "/opt/homebrew/Cellar/python@3.14/3.14.4/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python artifacts/soak_codex_concurrency.py --workers 6 --duration-sec 90 --spawn-interval-ms 400 --sample-interval-sec 2 --debug-lifecycle --scenarios spawn_recursive --codex-bin /opt/homebrew/bin/codex --stdio-server-bin /Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/codex-pr2/codex-rs/target/release/test_stdio_server --out-dir /Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/current-main-20260428-212049"
+    }
+  ],
+  "samples_path": "/Users/adpena/Projects/codex-mcp-and-subagent-memory-leaks/artifacts/soak-summaries/current-main-20260428-212049/process_samples.jsonl"
+}

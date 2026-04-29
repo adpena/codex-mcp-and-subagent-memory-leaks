@@ -1,0 +1,100 @@
+2026-04-29T02:22:19.777702Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.783033Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.788973Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.789315Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.791127Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.797494Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.797839Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.799960Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.804895Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.805218Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached (max 6)
+collab: SpawnAgent
+2026-04-29T02:22:19.810680Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.811863Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+collab: SpawnAgent
+2026-04-29T02:22:19.816003Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached (max 6)
+2026-04-29T02:22:19.818429Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.818436Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.821307Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.826581Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.829151Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.835714Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.836593Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.838654Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.844074Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.844153Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.845235Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.854353Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.856885Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.865750Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.867166Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.869740Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.874770Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+collab: SpawnAgent
+2026-04-29T02:22:19.878294Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached (max 6)
+2026-04-29T02:22:19.878738Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.879905Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.880383Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.887591Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.890133Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.890855Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.896290Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.899630Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.905504Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.906486Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.913848Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.921812Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.922140Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.923300Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached (max 6)
+collab: SpawnAgent
+2026-04-29T02:22:19.928648Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.928927Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.929741Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.932368Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.934149Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.937746Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.940419Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.942714Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.943705Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.950681Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.958678Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.964031Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.967028Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.967059Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.972032Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+collab: SpawnAgent
+2026-04-29T02:22:19.974267Z ERROR codex_core::tools::router: error=collab spawn failed: agent thread limit reached (max 6)
+2026-04-29T02:22:19.992201Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:19.994281Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:20.002110Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:20.003532Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:20.008517Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:20.013173Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:20.014863Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+2026-04-29T02:22:20.018532Z ERROR codex_core::tools::router: error=unsupported call: spawn_agent
+turn interrupted
+2026-04-29T02:22:20.025900Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.050714Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-fff7-7ee2-9e80-76fd8aa86bcf not found
+2026-04-29T02:22:20.051020Z ERROR codex_core::session: failed to record rollout items: thread 019dd70a-0008-75e3-939b-0f6c2c7f0c4c not found
+2026-04-29T02:22:20.051047Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.051062Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.051286Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.051297Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.052280Z ERROR codex_core::session: failed to record rollout items: thread 019dd70a-0018-7483-a3b7-7930ccee2496 not found
+2026-04-29T02:22:20.052859Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.052869Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.070196Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-fffb-74c0-86b9-657dcd974cfd not found
+2026-04-29T02:22:20.071796Z ERROR codex_core::session: failed to record rollout items: thread 019dd70a-0001-70a2-a72a-980d05c305e2 not found
+2026-04-29T02:22:20.072041Z ERROR codex_core::session: failed to record rollout items: thread 019dd70a-000f-73a2-a46f-9c8b541de50f not found
+2026-04-29T02:22:20.072620Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.072637Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.075340Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.075353Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.075460Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.075474Z ERROR codex_core::session: failed to record rollout items: thread 019dd709-ff28-7952-859a-918bb4917e5a not found
+2026-04-29T02:22:20.082586Z  WARN codex_rmcp_client::stdio_server_launcher: Failed to terminate MCP process group 67714: No such process (os error 3)
+2026-04-29T02:22:20.082637Z  WARN codex_rmcp_client::stdio_server_launcher: Failed to terminate MCP process group 68194: No such process (os error 3)
+2026-04-29T02:22:20.082651Z  WARN codex_rmcp_client::stdio_server_launcher: Failed to terminate MCP process group 67931: No such process (os error 3)
+2026-04-29T02:22:20.082890Z  WARN codex_rmcp_client::stdio_server_launcher: Failed to terminate MCP process group 68550: No such process (os error 3)
+2026-04-29T02:22:20.088520Z  WARN codex_rmcp_client::stdio_server_launcher: Failed to terminate MCP process group 68053: No such process (os error 3)
+2026-04-29T02:22:20.091473Z  WARN codex_rmcp_client::stdio_server_launcher: Failed to terminate MCP process group 68133: No such process (os error 3)

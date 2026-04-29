@@ -254,7 +254,7 @@ def start_worker(
     )
 
 
-def sample_process_table() -> list[dict]:
+def sample_process_table(codex_bin: pathlib.Path, stdio_server_bin: pathlib.Path) -> list[dict]:
     result = subprocess.run(
         ["ps", "-axo", "pid,ppid,pgid,rss,vsz,stat,etime,command"],
         check=True,
@@ -263,12 +263,17 @@ def sample_process_table() -> list[dict]:
     )
     lines = result.stdout.splitlines()
     records: list[dict] = []
+    codex_bin_str = str(codex_bin)
+    stdio_bin_str = str(stdio_server_bin)
     for line in lines[1:]:
         parts = line.strip().split(None, 7)
         if len(parts) != 8:
             continue
         pid, ppid, pgid, rss, vsz, stat, etime, command = parts
-        if "target/debug/codex" not in command and "test_stdio_server" not in command:
+        # Match the user-provided binary paths so this works regardless of
+        # whether codex came from `target/{debug,release}/codex`, `npm`-installed
+        # `/opt/homebrew/bin/codex`, or any other location.
+        if codex_bin_str not in command and stdio_bin_str not in command:
             continue
         records.append(
             {
@@ -319,8 +324,14 @@ def terminate_workers(workers: list[Worker], grace_sec: float) -> None:
         terminate_worker(worker, signal.SIGKILL)
 
 
-def collect_summary(out_dir: pathlib.Path, workers: list[Worker], samples_path: pathlib.Path) -> dict:
-    process_records = sample_process_table()
+def collect_summary(
+    out_dir: pathlib.Path,
+    workers: list[Worker],
+    samples_path: pathlib.Path,
+    codex_bin: pathlib.Path,
+    stdio_server_bin: pathlib.Path,
+) -> dict:
+    process_records = sample_process_table(codex_bin, stdio_server_bin)
     summary = {
         "out_dir": str(out_dir),
         "workers": [
@@ -391,7 +402,7 @@ def main() -> int:
         while time.monotonic() < end:
             now = time.monotonic()
             if now >= next_sample:
-                samples = sample_process_table()
+                samples = sample_process_table(codex_bin, stdio_server_bin)
                 write_samples(
                     samples_path,
                     [
@@ -410,7 +421,7 @@ def main() -> int:
             time.sleep(0.2)
     finally:
         terminate_workers(workers, grace_sec=5.0)
-        summary = collect_summary(out_dir, workers, samples_path)
+        summary = collect_summary(out_dir, workers, samples_path, codex_bin, stdio_server_bin)
         print(
             f"[summary] survivors={len(summary['survivors'])} summary={out_dir / 'summary.json'}",
             flush=True,

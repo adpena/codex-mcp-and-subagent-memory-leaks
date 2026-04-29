@@ -1,7 +1,11 @@
 # Codex MCP and subagent memory leaks
 
 Investigation, reproducible soak, and a `codex-core` patch for the long-session
-degradation seen on macOS under recursive subagents and stdio MCP fanout.
+degradation seen across macOS, Linux, and Windows under recursive subagents and
+stdio MCP fanout. The defects are in platform-agnostic Rust code (no
+`cfg(target_os)` guards on any of the seven affected files); user-visible
+symptoms vary by terminal emulator and OS, but the underlying memory / process
+leak is universal.
 
 Per [`openai/codex`'s contributing policy](https://github.com/openai/codex/blob/main/docs/contributing.md),
 external code contributions are by invitation only and unsolicited PRs are closed
@@ -60,7 +64,12 @@ Three behaviors compound under recursive subagent + stdio MCP load:
 3. `handlers::shutdown` does a single descendant pass; descendants that become
    observable mid-shutdown can outlive the root.
 
-Soak measurements on the same `spawn_recursive` scenario:
+### Soak telemetry
+
+Original investigation, against
+[`3895ddd6b`](https://github.com/openai/codex/commit/3895ddd6b1caf80cd77d6fd44e3ce55bd290ef18),
+on the `spawn_recursive` scenario with the lifecycle hooks the harness was
+designed for:
 
 | Run                                       | `slot_reserved` | `slot_released` | `mcp_spawned` | `mcp_dropped` |
 | ----------------------------------------- | --------------- | --------------- | ------------- | ------------- |
@@ -68,23 +77,94 @@ Soak measurements on the same `spawn_recursive` scenario:
 | Patched, run 1                            | 6               | **4**           | 7             | 6             |
 | Patched, run 2                            | 6               | **5**           | 7             | 7             |
 
-Raw summaries: [`artifacts/soak-summaries/`](artifacts/soak-summaries/).
+Refresh against current `codex-cli 0.125.0` (6 workers × 90 s, summary at
+[`artifacts/soak-summaries/current-main-20260428-212049/`](artifacts/soak-summaries/current-main-20260428-212049/)):
 
-## Environment
+- The `CODEX_DEBUG_AGENT_LIFECYCLE` / `CODEX_DEBUG_MCP_LIFECYCLE` /
+  `CODEX_DEBUG_THREAD_LISTENERS` env vars and the corresponding lifecycle log
+  strings (`"reserved spawned-agent slot"`, etc.) have been removed in
+  upstream, so the slot/MCP counters report `0` across the board on the new
+  CLI — the harness needs new telemetry hooks to recover those counts.
+- `spawn_agent` is now feature-gated; the SSE fixture used by the harness
+  drives `function_call: spawn_agent` events that the new tool router
+  rejects as `unsupported call: spawn_agent` (50,292 such errors in
+  `worker-00` alone). The harness needs a config flag or fixture update to
+  drive the V1/V2 handler on current `main`.
+- What remains visible in the refresh:
+  - **44 stdio MCP child processes across 6 workers (≈7 per worker)** during
+    steady state, sampled by `ps`. This confirms **defect #2 (per-session
+    `McpConnectionManager` fanout) is still present in `0.125.0`.**
+  - During shutdown the launcher emits
+    `Failed to terminate MCP process group … No such process` warnings,
+    suggesting the cleanup path races with process-group teardown.
+- Defects #1 (slot retention) and #3 (root-shutdown drain) require working
+  recursive `spawn_agent` to manifest behaviorally. With the current harness
+  blocked on the gating change, the verification for those defects is the
+  source-level analysis below plus the suggested unit tests in
+  [`artifacts/upstream-issue-draft.md`](artifacts/upstream-issue-draft.md).
+
+Raw summaries:
+[`artifacts/soak-summaries/`](artifacts/soak-summaries/).
+
+## Reporter's environment
+
+This is the environment in which I personally reproduced the failure mode. It
+is not the only environment affected — see "Related upstream reports" below.
 
 - macOS 26.4 / Darwin 25.4.0 / arm64, high-memory machine
-- Ghostty, several panes open at once
-- each pane: an interactive `codex` session, often spawning recursive subagents
-- MCP config with many stdio servers; some tools occasionally hang or fail without
-  returning cleanly
-- subagents frequently started and not explicitly closed before the root session
-  was interrupted or restarted
+- Ghostty 1.3.1, several panes open at once
+- each pane: an interactive `codex-cli 0.125.0` session, often spawning
+  recursive subagents
+- MCP config with many stdio servers; some tools occasionally hang or fail
+  without returning cleanly
+- subagents frequently started and not explicitly closed before the root
+  session was interrupted or restarted
 - sessions running for hours
+- ChatGPT Pro subscription, latest Codex model
 
-User-visible failure mode: cumulative. The pane with the most subagents and the
-heaviest MCP traffic flickers, janks, mis-renders, then loses `Ctrl+C`. Recovery
-attempts from neighboring panes can spread damage as agents kill each other's
-processes.
+User-visible failure mode: cumulative. The pane with the most subagents and
+the heaviest MCP traffic flickers, janks, mis-renders, then loses `Ctrl+C`.
+Recovery attempts from neighboring panes can spread damage as agents kill
+each other's processes.
+
+## Related upstream reports (cross-platform)
+
+These existing `openai/codex` issues describe symptoms consistent with the
+defects below, on every supported OS:
+
+- **macOS** — [#17832](https://github.com/openai/codex/issues/17832)
+  ("Regression: Playwright MCP stdio processes still leak after #16895 fix —
+  213 orphaned pairs, 13.6 GB RSS"; `codex-cli 0.120.0`, ChatGPT Pro);
+  [#18103](https://github.com/openai/codex/issues/18103)
+  (zellij/Ghostty, watchdog panic);
+  [#18589](https://github.com/openai/codex/issues/18589)
+  (abnormally high RAM, Mac app);
+  [#19333](https://github.com/openai/codex/issues/19333)
+  (Mac app high memory after update);
+  [#16866](https://github.com/openai/codex/issues/16866)
+  (`os_refcnt` overflow → kernel panic on Apple Silicon).
+- **Linux** — [#16828](https://github.com/openai/codex/issues/16828)
+  (CachyOS / kitty, **49.4 GB peak**, hard-froze a 64 GB workstation);
+  [#18041](https://github.com/openai/codex/issues/18041)
+  (WSL OOM → full system crash).
+- **Windows** — [#19381](https://github.com/openai/codex/issues/19381)
+  (Windows app + VS Code extension, **10 GB+** RAM after update);
+  [#12414](https://github.com/openai/codex/issues/12414)
+  (`codex-cli 0.104.0`, **90 GB** commit growth → system OOM);
+  [#19293](https://github.com/openai/codex/issues/19293)
+  (sandbox process, heavy disk I/O / system lag).
+- **Tool / fanout pattern** — [#19600](https://github.com/openai/codex/issues/19600)
+  (Python tool calls, **135 GB RAM / 25 GB swap** after long session);
+  [#17574](https://github.com/openai/codex/issues/17574)
+  (xcodebuild / chrome-devtools MCP leak);
+  [#12491](https://github.com/openai/codex/issues/12491)
+  (37 GB / 1300+ zombies — original report referenced by #17832).
+
+#17832 is the closest active thread to the analysis here — it identifies the
+same MCP teardown path as the failure mode and references the prior partial
+fix in [#16895](https://github.com/openai/codex/pull/16895). The substantive
+hand-off is intended to be a comment on that issue (draft at
+[`artifacts/comment-on-17832-draft.md`](artifacts/comment-on-17832-draft.md)).
 
 ## Where the leak lives
 
